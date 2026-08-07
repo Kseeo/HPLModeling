@@ -1,0 +1,39 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(Get-CimInstance Win32_Process -Filter \"Name = 'python.exe'\")",
+      "PowerShell(Stop-Process -Id 38832 -Force -Confirm:$false -ErrorAction SilentlyContinue)",
+      "PowerShell(& \".venv\\\\Scripts\\\\python.exe\" \"scripts\\\\ssm_cross_validate.py\" \"data\\\\output\\\\registered_cache.npz\" --component-range \"10,20,30,40,50\")",
+      "PowerShell(& \".venv\\\\Scripts\\\\python.exe\" \"scripts\\\\ssm_cross_validate.py\" \"data\\\\output\\\\registered_cache.npz\" --component-range \"50,60,70,80,90\")",
+      "PowerShell(& \".venv\\\\Scripts\\\\python.exe\" \"scripts\\\\ssm_landmark_holdout.py\" \"data\\\\output\\\\registered_cache.npz\" --n-components 20 --export-examples 3)",
+      "PowerShell(& \"c:\\\\Users\\\\cani0\\\\foot_deform_engine\\\\.venv\\\\Scripts\\\\python.exe\" \"C:\\\\Users\\\\cani0\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-cani0-foot-deform-engine\\\\5d1f9dbf-5d12-4158-8831-593e6a1ad830\\\\scratchpad\\\\diag_landmark.py\")",
+      "PowerShell(& \"c:\\\\Users\\\\cani0\\\\foot_deform_engine\\\\.venv\\\\Scripts\\\\python.exe\" \"C:\\\\Users\\\\cani0\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-cani0-foot-deform-engine\\\\5d1f9dbf-5d12-4158-8831-593e6a1ad830\\\\scratchpad\\\\apply_gpa.py\")",
+      "PowerShell(& \"c:\\\\Users\\\\cani0\\\\foot_deform_engine\\\\.venv\\\\Scripts\\\\python.exe\" \"scripts\\\\ssm_cross_validate.py\" \"data\\\\output\\\\registered_cache_aligned.npz\" --component-range \"5,10,15,20,30,40\")",
+      "PowerShell(& \"c:\\\\Users\\\\cani0\\\\foot_deform_engine\\\\.venv\\\\Scripts\\\\python.exe\" \"scripts\\\\ssm_cross_validate.py\" \"data\\\\output\\\\registered_cache_aligned.npz\" --component-range \"50,60,70,80\")",
+      "PowerShell(& \"c:\\\\Users\\\\cani0\\\\foot_deform_engine\\\\.venv\\\\Scripts\\\\python.exe\" \"scripts\\\\ssm_landmark_holdout.py\" \"data\\\\output\\\\registered_cache_aligned.npz\" --n-components 20 --export-examples 3)",
+      "PowerShell(& \"c:\\\\Users\\\\cani0\\\\foot_deform_engine\\\\.venv\\\\Scripts\\\\python.exe\" \"scripts\\\\ssm_landmark_holdout.py\" \"data\\\\output\\\\registered_cache_aligned.npz\" --n-components 20 --export-examples 3 --plantar-band-mm 40)",
+      "PowerShell(& \"c:\\\\Users\\\\cani0\\\\foot_deform_engine\\\\.venv\\\\Scripts\\\\python.exe\" \"scripts\\\\sparse_sfm_prototype.py\" --images-dir \"data\\\\output\\\\sfm_prototype\\\\test02_run\\\\images\" --workdir \"data\\\\output\\\\sfm_prototype\\\\test02_run\" --masks-dir \"data\\\\output\\\\sfm_prototype\\\\test02_run\\\\masks\")",
+      "PowerShell(& \"c:\\\\Users\\\\cani0\\\\foot_deform_engine\\\\.venv\\\\Scripts\\\\python.exe\" \"C:\\\\Users\\\\cani0\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-cani0-foot-deform-engine\\\\5d1f9dbf-5d12-4158-8831-593e6a1ad830\\\\scratchpad\\\\rebuild_ssm.py\")",
+      "PowerShell(& \"c:\\\\Users\\\\cani0\\\\foot_deform_engine\\\\.venv\\\\Scripts\\\\python.exe\" \"scripts\\\\fit_ssm_to_pointcloud.py\" \"data\\\\output\\\\ssm_normal_spectrum.npz\" \"data\\\\output\\\\sfm_prototype\\\\test02_run\\\\sparse_points.ply\" --out \"data\\\\output\\\\test02_fit.stl\" --out-cloud \"data\\\\output\\\\test02_aligned_cloud.ply\")",
+      "PowerShell(& \"c:\\\\Users\\\\cani0\\\\foot_deform_engine\\\\.venv\\\\Scripts\\\\python.exe\" \"C:\\\\Users\\\\cani0\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-cani0-foot-deform-engine\\\\5d1f9dbf-5d12-4158-8831-593e6a1ad830\\\\scratchpad\\\\diag_flat.py\")",
+      "PowerShell(& \"c:\\\\Users\\\\cani0\\\\foot_deform_engine\\\\.venv\\\\Scripts\\\\python.exe\" \"C:\\\\Users\\\\cani0\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-cani0-foot-deform-engine\\\\5d1f9dbf-5d12-4158-8831-593e6a1ad830\\\\scratchpad\\\\diag_flat2.py\")",
+      "PowerShell(& \"c:\\\\Users\\\\cani0\\\\foot_deform_engine\\\\.venv\\\\Scripts\\\\python.exe\" \"C:\\\\Users\\\\cani0\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-cani0-foot-deform-engine\\\\5d1f9dbf-5d12-4158-8831-593e6a1ad830\\\\scratchpad\\\\crop_and_rebuild.py\")",
+      "PowerShell(& \"c:\\\\Users\\\\cani0\\\\foot_deform_engine\\\\.venv\\\\Scripts\\\\python.exe\" \"C:\\\\Users\\\\cani0\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-cani0-foot-deform-engine\\\\5d1f9dbf-5d12-4158-8831-593e6a1ad830\\\\scratchpad\\\\render_mesh.py\")",
+      "Bash(.venv/Scripts/python.exe scripts/clean_point_cloud.py data/output/sfm_prototype/test02_run_20260807_v2/sparse/0 --masks-dir data/output/sfm_prototype/test02_run_20260807_v2/masks --out data/output/sfm_prototype/test02_run_20260807_v2/cleaned_by_mask.ply)",
+      "Bash(.venv/Scripts/python.exe scripts/clean_point_cloud.py data/output/sfm_prototype/test02_run_20260807_v2/sparse/0 --out data/output/sfm_prototype/test02_run_20260807_v2/cleaned_by_plane_fixed.ply)",
+      "Bash(.venv/Scripts/python.exe -c ' *)",
+      "Bash(.venv/Scripts/python.exe scripts/clean_point_cloud.py data/output/sfm_prototype/test02_run_20260807_v2/sparse/0 --masks-dir data/output/sfm_prototype/test02_run_20260807_v2/masks --intersect --out data/output/sfm_prototype/test02_run_20260807_v2/cleaned_intersect.ply)",
+      "Bash(.venv/Scripts/python.exe scripts/clean_point_cloud.py data/output/sfm_prototype/test02_run_20260807_v2/sparse/0 --masks-dir data/output/sfm_prototype/test02_run_20260807_v2/masks --intersect --cluster --out data/output/sfm_prototype/test02_run_20260807_v2/cleaned_intersect_cluster.ply)",
+      "Bash(.venv/Scripts/python.exe scripts/sparse_sfm_prototype.py --video data/samples/test03.mp4 --workdir data/output/sfm_prototype/test03_run_20260807)",
+      "Bash(.venv/Scripts/python.exe scripts/generate_foot_masks.py data/output/sfm_prototype/test03_run_20260807/images --out data/output/sfm_prototype/test03_run_20260807/masks)",
+      "Bash(.venv/Scripts/python.exe scripts/clean_point_cloud.py data/output/sfm_prototype/test03_run_20260807/sparse/0 --masks-dir data/output/sfm_prototype/test03_run_20260807/masks --intersect --cluster --out data/output/sfm_prototype/test03_run_20260807/cleaned_intersect_cluster.ply)",
+      "Bash(.venv/Scripts/python.exe scripts/clean_point_cloud.py data/output/sfm_prototype/test03_run_20260807/sparse/0 --masks-dir data/output/sfm_prototype/test03_run_20260807/masks --cluster --out data/output/sfm_prototype/test03_run_20260807/cleaned_mask_cluster_no_intersect.ply)",
+      "Bash(.venv/Scripts/python.exe scripts/clean_point_cloud.py data/output/sfm_prototype/test02_run_20260807_v2/sparse/0 --masks-dir data/output/sfm_prototype/test02_run_20260807_v2/masks --cluster --out data/output/sfm_prototype/test02_run_20260807_v2/cleaned_final_recommended.ply)",
+      "Bash(.venv/Scripts/python.exe scripts/sparse_sfm_prototype.py --video data/samples/test00.mp4 --workdir data/output/sfm_prototype/test00_run_20260807)",
+      "Bash(.venv/Scripts/python.exe scripts/generate_foot_masks.py data/output/sfm_prototype/test00_run_20260807/images --out data/output/sfm_prototype/test00_run_20260807/masks)",
+      "Bash(.venv/Scripts/python.exe scripts/clean_point_cloud.py data/output/sfm_prototype/test00_run_20260807/sparse/0 --masks-dir data/output/sfm_prototype/test00_run_20260807/masks --cluster --out data/output/sfm_prototype/test00_run_20260807/cleaned_final_recommended.ply)",
+      "Bash(.venv/Scripts/python.exe scripts/fit_deformer_to_pointcloud.py data/output/sfm_prototype/test00_run_20260807/cleaned_final_recommended.ply --out data/output/test00_deformer_fit.stl)",
+      "Bash(.venv/Scripts/python.exe -c \"import open3d; print\\('open3d', open3d.__version__\\)\")"
+    ]
+  }
+}
