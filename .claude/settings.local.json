@@ -1,0 +1,32 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:watery-ceramic-aea.notion.site)",
+      "PowerShell(& \".venv\\\\Scripts\\\\python.exe\" -m pip install pycolmap opencv-python-headless 2>&1)",
+      "PowerShell(& \".venv\\\\Scripts\\\\python.exe\" -c \"import pycolmap; print\\(pycolmap.__version__\\); print\\([n for n in dir\\(pycolmap\\) if not n.startswith\\('_'\\)]\\)\")",
+      "PowerShell(& \".venv\\\\Scripts\\\\python.exe\" \"scripts\\\\sparse_sfm_prototype.py\" --help)",
+      "PowerShell(& \".venv\\\\Scripts\\\\python.exe\" \"scripts\\\\triangulate_landmarks.py\" --recon-dir \"data\\\\output\\\\sfm_prototype\\\\sparse\\\\0\" --landmarks \"data\\\\samples\\\\landmarks_pixels_demo.json\" --out-dir \"data\\\\output\\\\sfm_prototype\")",
+      "PowerShell(& \".venv\\\\Scripts\\\\python.exe\" \"scripts\\\\sparse_sfm_prototype.py\" --video \"data\\\\samples\\\\test4.mp4\" --interval 0.5 --workdir \"data\\\\output\\\\sfm_prototype\\\\test4_run\")",
+      "PowerShell(& \"c:\\\\Users\\\\cani0\\\\foot_deform_engine\\\\.venv\\\\Scripts\\\\python.exe\" \"C:\\\\Users\\\\cani0\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-cani0-foot-deform-engine\\\\5d1f9dbf-5d12-4158-8831-593e6a1ad830\\\\scratchpad\\\\render_deformer.py\")",
+      "PowerShell($env:PYTHONPATH = \"c:\\\\Users\\\\cani0\\\\foot_deform_engine\\\\src\"; & \"c:\\\\Users\\\\cani0\\\\foot_deform_engine\\\\.venv\\\\Scripts\\\\python.exe\" -m foot_engine.deformer)",
+      "PowerShell(& \"c:\\\\Users\\\\cani0\\\\foot_deform_engine\\\\.venv\\\\Scripts\\\\python.exe\" \"scripts\\\\fit_deformer_to_pointcloud.py\" \"data\\\\output\\\\sfm_prototype\\\\test02_run\\\\sparse_points.ply\" --out \"data\\\\output\\\\test02_deformer_fit.stl\")",
+      "PowerShell(& \"c:\\\\Users\\\\cani0\\\\foot_deform_engine\\\\.venv\\\\Scripts\\\\python.exe\" \"C:\\\\Users\\\\cani0\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-cani0-foot-deform-engine\\\\5d1f9dbf-5d12-4158-8831-593e6a1ad830\\\\scratchpad\\\\render_test02_deformer.py\")",
+      "PowerShell(& \"c:\\\\Users\\\\cani0\\\\foot_deform_engine\\\\.venv\\\\Scripts\\\\python.exe\" \"scripts\\\\fit_deformer_to_pointcloud.py\" \"data\\\\output\\\\sfm_prototype\\\\test02_run\\\\sparse_points.ply\" --out \"C:\\\\Users\\\\cani0\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-cani0-foot-deform-engine\\\\5d1f9dbf-5d12-4158-8831-593e6a1ad830\\\\scratchpad\\\\test02_deformer_fit.stl\")",
+      "PowerShell(& \"c:\\\\Users\\\\cani0\\\\foot_deform_engine\\\\.venv\\\\Scripts\\\\python.exe\" \"C:\\\\Users\\\\cani0\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-cani0-foot-deform-engine\\\\5d1f9dbf-5d12-4158-8831-593e6a1ad830\\\\scratchpad\\\\render_report_figs.py\")",
+      "PowerShell(& \"c:\\\\Users\\\\cani0\\\\foot_deform_engine\\\\.venv\\\\Scripts\\\\python.exe\" \"C:\\\\Users\\\\cani0\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-cani0-foot-deform-engine\\\\5d1f9dbf-5d12-4158-8831-593e6a1ad830\\\\scratchpad\\\\inject_images.py\")",
+      "PowerShell(& \"c:\\\\Users\\\\cani0\\\\foot_deform_engine\\\\.venv\\\\Scripts\\\\python.exe\" \"C:\\\\Users\\\\cani0\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-cani0-foot-deform-engine\\\\5d1f9dbf-5d12-4158-8831-593e6a1ad830\\\\scratchpad\\\\inspect_raw_cloud.py\")",
+      "Bash(.venv/Scripts/python.exe scripts/fit_deformer_to_pointcloud.py data/output/sfm_prototype/test00_run_20260807/cleaned_final_recommended.ply --template data/templates/S0001_real_template.stl --out data/output/test00_deformer_fit_realscan.stl)",
+      "Bash(.venv/Scripts/python.exe -c ' *)",
+      "Bash(.venv/Scripts/python.exe -c \"import trimesh, open3d\")",
+      "Bash(.venv/Scripts/python.exe scripts/fit_deformer_to_pointcloud.py data/output/sfm_prototype/test00_run_20260807/cleaned_final_recommended.ply --template data/templates/S0001_real_template.stl --side right --template-side left --out data/output/test00_deformer_fit_realscan_LRfix.stl)",
+      "Bash(.venv/Scripts/python.exe scripts/fit_deformer_to_pointcloud.py data/output/sfm_prototype/test00_run_20260807/cleaned_final_recommended.ply --template data/templates/S0001_real_template.stl --out data/output/test00_deformer_fit_realscan_NOFIX.stl)",
+      "Bash(rm -f \"/c/Users/cani0/AppData/Local/Temp/claude/c--Users-cani0-foot-deform-engine/6158cfe8-3e1c-4247-bb4f-67066300ebf5/scratchpad/render_compare.py\")",
+      "Bash(.venv/Scripts/python.exe \"C:\\\\Users\\\\cani0\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-cani0-foot-deform-engine\\\\6158cfe8-3e1c-4247-bb4f-67066300ebf5\\\\scratchpad\\\\render_compare.py\")",
+      "Bash(.venv/Scripts/python.exe \"C:\\\\Users\\\\cani0\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-cani0-foot-deform-engine\\\\6158cfe8-3e1c-4247-bb4f-67066300ebf5\\\\scratchpad\\\\render_compare2.py\")",
+      "Bash(.venv/Scripts/python.exe \"C:\\\\Users\\\\cani0\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-cani0-foot-deform-engine\\\\6158cfe8-3e1c-4247-bb4f-67066300ebf5\\\\scratchpad\\\\overlay_check.py\")"
+    ],
+    "additionalDirectories": [
+      "C:\\Users\\cani0\\AppData\\Local\\Temp\\claude\\c--Users-cani0-foot-deform-engine\\6158cfe8-3e1c-4247-bb4f-67066300ebf5\\scratchpad"
+    ]
+  }
+}

@@ -1,0 +1,36 @@
+{
+  "meta": {
+    "subject_id": "P3EC-DEMO-0002",
+    "note": "이미지 2장만 들어온 경우. 측정되지 않은 항목(발목 너비 등)은 템플릿 값을 유지한다."
+  },
+  "side": "right",
+  "measurements": {
+    "foot_length_mm": 242.0
+  },
+  "images": [
+    {
+      "view": "top",
+      "image_size_px": [1000, 1400],
+      "landmarks": {
+        "heel_center": [500, 1300],
+        "toe_tip": [500, 90],
+        "mtp1_medial": [280, 560],
+        "mtp5_lateral": [740, 590]
+      }
+    },
+    {
+      "view": "medial",
+      "image_size_px": [1400, 1000],
+      "landmarks": {
+        "heel_back": [120, 720],
+        "toe_tip": [1330, 780],
+        "ground_ref": [700, 800],
+        "arch_apex": [640, 705],
+        "instep_top": [560, 505]
+      }
+    }
+  ],
+  "control_point_offsets_mm": {
+    "instep_top": [0.0, 0.0, 1.5]
+  }
+}

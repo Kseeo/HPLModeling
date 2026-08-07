@@ -1,0 +1,58 @@
+{
+  "meta": {
+    "subject_id": "P3EC-DEMO-0001",
+    "captured_at": "2026-08-04",
+    "note": "4장(상면/내측/외측/후면) 촬영 더미 데이터. 좌표 단위는 픽셀."
+  },
+  "side": "right",
+  "images": [
+    {
+      "view": "top",
+      "image_size_px": [1200, 1600],
+      "scale_mm_per_px": 0.2,
+      "landmarks": {
+        "heel_center": [600, 1500],
+        "toe_tip": [600, 160],
+        "mtp1_medial": [345, 668],
+        "mtp5_lateral": [855, 640],
+        "heel_medial": [435, 1420],
+        "heel_lateral": [765, 1420]
+      }
+    },
+    {
+      "view": "medial",
+      "image_size_px": [1600, 1200],
+      "landmarks": {
+        "heel_back": [145, 872],
+        "toe_tip": [1485, 935],
+        "ground_ref": [800, 950],
+        "arch_apex": [700, 830],
+        "instep_top": [620, 620],
+        "medial_malleolus": [300, 590]
+      }
+    },
+    {
+      "view": "lateral",
+      "image_size_px": [1600, 1200],
+      "landmarks": {
+        "heel_back": [150, 875],
+        "toe_tip": [1490, 930],
+        "ground_ref": [800, 950],
+        "instep_top": [640, 630],
+        "lateral_malleolus": [330, 620]
+      }
+    },
+    {
+      "view": "rear",
+      "image_size_px": [1000, 1200],
+      "scale_mm_per_px": 0.2,
+      "landmarks": {
+        "ground_ref": [600, 1000],
+        "heel_medial": [430, 1000],
+        "heel_lateral": [760, 1000],
+        "medial_malleolus": [415, 640],
+        "lateral_malleolus": [760, 690]
+      }
+    }
+  ]
+}
