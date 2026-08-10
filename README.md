@@ -31,8 +31,10 @@
    포토그래메트리(VRIN)를 대체하기 위한 in-house 경로. `pycolmap`으로
    사진 여러 장에서 카메라 포즈 + sparse 포인트클라우드를 복원하고,
    배경/노이즈를 제거한 뒤 위 1번 변형 엔진에 태워 최종 메쉬를 만든다.
-   현재 **sparse 복원까지만** 다루고(모듈 [`reconstruction.py`](src/foot_engine/sfm/reconstruction.py)
-   docstring 참고) dense(MVS)/텍스처링은 하지 않는다 — 아래
+   `fitting.py` 경로는 스칼라 계측치 몇 개만 필요해서 **sparse 복원까지만**
+   있으면 되지만, 실제 3D 메쉬(시각화/QA용)가 필요하면
+   [`dense.py`](src/foot_engine/sfm/dense.py)로 OpenMVS 기반 dense MVS를
+   선택적으로 이어붙일 수 있다 — 아래 [시나리오 E](#e-dense-mvs-메쉬-생성-선택-별도-설치-필요)와
    [알려진 한계](#알려진-한계--진행-상황) 절 참고.
 
 세 번째로 `foot_engine.ssm`(통계적 형상 모델, PCA 기반)이 있는데, 한때 메쉬
@@ -60,6 +62,7 @@ foot_deform_engine/
 │   │   ├── reconstruction.py #     pycolmap 기반 sparse SfM
 │   │   ├── masking.py        #     발/피부 마스크 (rembg + MediaPipe)
 │   │   ├── cleaning.py       #     포인트클라우드 배경/노이즈 제거
+│   │   ├── dense.py          #     (선택) OpenMVS 기반 dense MVS 메쉬 생성
 │   │   ├── fitting.py        #     점군 → 계측치 → 변형 엔진 연결
 │   │   └── pipeline.py       #     위 전부를 엮는 오케스트레이션
 │   └── ssm/                  #   통계적 형상 모델 (현재 보류, 참고용)
@@ -100,8 +103,27 @@ pip install numpy scipy scikit-learn trimesh[easy] pycolmap opencv-python-headle
 > `rembg`가 쓰는 `PyMatting` 등)은 pip가 알아서 딸려 온다.
 
 CUDA/GPU는 **필요 없다** — sparse SfM(`pycolmap`)과 변형 엔진 모두 CPU로
-돈다. (dense MVS를 실험적으로 붙이는 작업은 진행 중이며, 이것도 CUDA 없이
-CPU 기반 OpenMVS로 검증 중이다 — [알려진 한계](#알려진-한계--진행-상황) 참고.)
+돈다. dense MVS(`dense.py`, 선택 기능)도 CPU로 돈다(실측 확인 — COLMAP/
+OpenMVS의 CUDA 빌드는 최신 CUDA 13.2를 요구해 드라이버 업그레이드 부담이
+커서 채택하지 않았다).
+
+### OpenMVS 설치 (dense MVS 쓸 때만 필요, 선택)
+
+실제 3D 메쉬가 필요해 `dense.py`/`scripts/run_dense_pipeline.py`를 쓰려면
+OpenMVS CLI 실행파일이 별도로 필요하다(pip 패키지 아님, 이 저장소
+`requirements`에도 없음):
+
+1. [OpenMVS 릴리즈 페이지](https://github.com/cdcseacave/openMVS/releases)에서
+   `OpenMVS_Windows_x64.zip`(CPU 빌드로 충분, CUDA 불필요 — 실측 확인)을
+   받아 아무 폴더에나 압축을 푼다.
+2. 그 안의 `vc17/x64/Release/` (또는 실행파일이 직접 있는 폴더)를
+   `OPENMVS_BIN_DIR` 환경변수로 지정하거나, `run_dense_pipeline.py`
+   실행 시 `--openmvs-bin`으로 넘긴다.
+
+```powershell
+$env:OPENMVS_BIN_DIR = "C:\tools\openmvs\vc17\x64\Release"
+python scripts/run_dense_pipeline.py data/output/sfm_pipeline/test02_run
+```
 
 한글 콘솔 출력: Windows의 기본 콘솔 코드페이지(cp949)에서 한글이 깨지거나
 죽는 문제가 있어, `scripts/*.py`는 실행 시작 시 `sys.stdout`/`stderr`를
@@ -278,6 +300,30 @@ python scripts/audit_scan_meshes.py data/samples/scan_manifest_template.csv `
 python scripts/build_ssm.py data/scans/manifest.csv --out data/output/ssm.npz
 ```
 
+### E. Dense MVS 메쉬 생성 (선택, 별도 설치 필요)
+
+`fitting.py` 경로(스칼라 계측치만 필요)는 이거 없이도 그대로 동작한다.
+실제 3D 메쉬(시각화/QA/향후 고정밀 활용)가 필요할 때만 쓴다. OpenMVS
+설치는 위 [설치](#openmvs-설치-dense-mvs-쓸-때만-필요-선택) 절 참고.
+
+```powershell
+# 1) 먼저 sparse SfM + 마스크를 만들어 둔다 (시나리오 B의 1~2단계와 동일)
+python scripts/run_sfm_pipeline.py --video data/samples/test02.mp4 `
+    --workdir data/output/sfm_pipeline/test02_run --out data/output/test02_fit.stl
+
+# 2) dense 메쉬 생성 (RefineMesh 제외, 빠름 — 몇 분 내)
+python scripts/run_dense_pipeline.py data/output/sfm_pipeline/test02_run
+
+# 3) 최종 품질까지 원하면 RefineMesh 포함 (느림 — 전체 소요시간의 70%+ 차지, 실측)
+python scripts/run_dense_pipeline.py data/output/sfm_pipeline/test02_run --refine
+```
+
+튜닝 근거(마스크는 densify 이전에 dilate=0으로 적용할 것, DBSCAN 최대군집
+방식은 발바닥 같은 성긴 진짜 부위를 삭제하는 버그가 있어 금지, `--smooth 0`,
+`--postprocess-dmaps`로 저텍스처 평면 공백 완화 등)는 전부
+[`dense.py`](src/foot_engine/sfm/dense.py) 모듈 docstring에 실측 수치와
+함께 정리돼 있다 — 파라미터를 바꾸기 전에 먼저 읽을 것.
+
 ## 모듈 설명 (`src/foot_engine`)
 
 | 모듈 | 역할 |
@@ -296,6 +342,7 @@ python scripts/build_ssm.py data/scans/manifest.csv --out data/output/ssm.npz
 | `sfm/reconstruction.py` | `pycolmap` 기반 sparse SfM (exhaustive 매칭 + incremental mapping) |
 | `sfm/masking.py` | 발/피부 세그멘테이션 마스크 (rembg + MediaPipe Selfie Multiclass 피부 정제) |
 | `sfm/cleaning.py` | 포인트클라우드 배경 제거(마스크 기반/기하학적) + 이상치 제거 + DBSCAN 군집화 |
+| `sfm/dense.py` | (선택) OpenMVS 기반 dense MVS — sparse 결과를 실제 3D 메쉬로 |
 | `sfm/fitting.py` | SfM 점군 → 강체 정렬 → 계측 → `FootMeshDeformer` 연결 |
 | `sfm/pipeline.py` | 위 다섯 단계를 엮는 오케스트레이션 (`run_pipeline()`) |
 | `ssm/preprocessing.py` | 스캔 노이즈 제거 + 자기 길이 기준 정규화 |
@@ -313,6 +360,7 @@ python scripts/build_ssm.py data/scans/manifest.csv --out data/output/ssm.npz
 | `inspect_frame_quality.py` | 프레임별 선명도/밝기/클리핑 지표 표로 출력 (QC 임계값 튜닝용) |
 | `generate_foot_masks.py` | 발/피부 마스크만 단독 생성 |
 | `clean_point_cloud.py` | sparse 점군 배경/노이즈 제거만 단독 실행 |
+| `run_dense_pipeline.py` | (선택) sparse SfM 결과 → OpenMVS dense 메쉬. 별도 설치 필요 |
 | `fit_deformer_to_pointcloud.py` | 점군 → 계측치 → 템플릿 변형만 단독 실행 |
 | `photo_to_deformer_demo.py` | 사진 1장(top view) → 실루엣 랜드마크 자동 추출 → 변형, 종단 데모 |
 | `triangulate_landmarks.py` | 여러 사진의 2D 랜드마크 픽셀 좌표 → 3D 삼각측량 |
@@ -338,15 +386,40 @@ python scripts/build_ssm.py data/scans/manifest.csv --out data/output/ssm.npz
   합성 데이터 검증에서 틀린 답을 냈다 — arch_height/instep_height/
   ankle_height 등 옆모습 기반 높이 계측치는 현재 신뢰하면 안 된다.
   top-view 추출(`extract_top_view_landmarks()`)만 검증되어 안전하다.
-- **SfM은 sparse까지만 다룬다.** dense(MVS)/텍스처링은 `fitting.py`가
-  스칼라 계측치 몇 개만 필요로 해서 원래 범위 밖이었는데, 노이즈 제거 +
-  dense 복원을 붙이는 실험이 진행 중이다. `pycolmap`의 내장 dense
-  스테레오(`patch_match_stereo`)는 CUDA가 필수인데, 배포된 pip wheel이
-  CUDA 없이 빌드돼 있고 COLMAP 공식 CUDA 바이너리는 최신 CUDA 13.2
-  기준이라 드라이버 업그레이드 부담이 커서, 대신 **OpenMVS(CPU 빌드)**로
-  COLMAP sparse 결과를 densify하는 경로를 검증 중이다(96장 sparse 3,067점
-  → dense 557,806점, CPU로 약 7분). 아직 `foot_engine.sfm`에 정식으로
-  통합되지 않았다.
+- **Dense MVS(`sfm/dense.py`)는 선택 기능이고 알려진 한계가 있다.**
+  `fitting.py` 경로는 이거 없이도 그대로 동작한다(스칼라 계측치만 필요).
+  실제 3D 메쉬가 필요할 때 OpenMVS(CPU 빌드, CUDA 불필요 — `pycolmap`
+  내장 dense 스테레오/COLMAP 공식 CUDA 바이너리는 최신 CUDA 13.2를
+  요구해 드라이버 업그레이드 부담이 커서 채택 안 함)로 densify한다.
+  남은 한계:
+    - **발 실루엣 경계의 MVS 깊이 노이즈는 마스크로 못 거른다.** 각 점을
+      관측한 모든 카메라에 재투영해 마스크와 대조해도(만장일치 기준에서도)
+      93.8%가 마스크 안쪽으로 판정된다 — 배경이 아니라 경계 자체의
+      깊이 추정 노이즈라 마스크 정확도를 아무리 올려도 원리적으로
+      못 거른다. `RefineMesh`(사진 광도일관성 보정)가 어느 정도 줄여주는
+      게 실측 확인됐지만 완전히 없애지는 못한다.
+    - **저텍스처 평면(발등/발바닥)에서 깊이 추정 자체가 비어 채워지지
+      않는 경우가 있다.** `DensifyPointCloud --postprocess-dmaps 3`
+      (remove-speckles+fill-gaps)로 일부 완화되나(실측: 정점 13.8%↑)
+      "꽉 찬 느낌"까지는 아니라는 육안 평가 있음 — 추가로 시도해볼 것:
+      `--sub-resolution-levels` 상향, `--number-views-fuse` 조정.
+    - **DBSCAN 최대 군집 유지 방식은 절대 쓰지 말 것.** 발바닥처럼 촬영
+      각도상 원래 점이 성긴 진짜 부위를 배경 노이즈로 오판해 통째로
+      삭제하는 버그가 실측으로 확인됐다(발바닥 노멀 방향 점 60,937개 →
+      0개). `dense.py`의 `clean_dense_point_cloud()`는 통계적 이상치
+      제거만 쓴다.
+    - **`DensifyPointCloud`가 간헐적으로 크래시한다**(ACCESS_VIOLATION/
+      힙손상, 원인 불명 — 멀티스레드 경쟁 상태로 추정). `--max-threads 8`로
+      낮추면 이 저장소 검증 중 재현 안 됨(기본값에 반영돼 있음).
+    - **`RefineMesh`가 압도적 병목**(전체 소요시간의 70~72%, 실측
+      1.5~9분)이라 `run_dense_pipeline.py` 기본값은 꺼져 있다
+      (`--refine`로 켤 것).
+    - sparse 재구성 폴더(`sparse/0`, `sparse/1`, ...)는 **번호가 크기순이
+      아니다** — `dense.py.largest_sparse_dir()`로 항상 실제 등록 이미지
+      수를 비교해서 골라야 한다(실측: 어떤 촬영에서 `sparse/1`이 108장,
+      `sparse/0`은 2장짜리 파편이었다).
+  실험 산출물: `data/output/dense_mvs_results/`(README에 각 결과의 상태
+  요약 포함).
 - **`FootMeshDeformer._apply_arch_height()`**는 한때 폭주 피드백 루프가
   있었으나 수정됨(스텝 클램프 + 미개선 시 중단). ball_width_mm는 아직
   ~40% 오차가 남아 있어 별도로 봐야 한다.
