@@ -1,28 +1,24 @@
-"""Sparse SfM 결과 -> OpenMVS 기반 dense 포인트클라우드/메쉬 복원.
+"""Sparse SfM 결과 기반 OpenMVS Dense 포인트클라우드/메쉬 복원 모듈 (선택적)
 
-`reconstruction.py`의 sparse 복원은 `fitting.py`가 스칼라 계측치 몇 개만
-필요로 해서 원래 여기까지 다룰 필요가 없었다(모듈 상단 주석 참고). 이 모듈은
-실제 3D 메쉬(시각화/QA/향후 고정밀 활용)가 필요할 때만 쓰는 **선택적** 다음
-단계다 — `fitting.py` 경로는 이 모듈 없이도 그대로 동작한다.
+`fitting.py` 동작에는 이 모듈이 필요 없으며, 시각화/QA/고정밀 3D 메쉬가 필요할 때만 사용합니다.
+OpenMVS CLI 실행파일이 필요하며(`OPENMVS_BIN_DIR` 설정), CUDA 없이 CPU 빌드로 동작합니다.
 
-파이프라인(2026-08-10 실측 검증)::
+파이프라인 흐름:
+    undistort_for_dense() -> convert_masks_for_openmvs() -> run_interface_colmap()
+    -> run_densify_point_cloud() -> clean_dense_point_cloud() -> run_reconstruct_mesh()
+    -> run_refine_mesh() (선택) -> keep_largest_component()
 
-    undistort_for_dense()          -- pycolmap, sparse 카메라를 PINHOLE로 왜곡보정
-        └─ convert_masks_for_openmvs()  -- masking.py 마스크를 OpenMVS 명명 규칙으로
-              └─ run_interface_colmap()     -- COLMAP 형식 -> OpenMVS 씬(.mvs)
-                    └─ run_densify_point_cloud()  -- 마스크 기반 dense 포인트클라우드
-                          └─ clean_dense_point_cloud()  -- 통계적 이상치 제거(뿔/스파이크 제거는 기본 꺼짐, 11번 참고)
-                                └─ run_reconstruct_mesh()   -- Delaunay+그래프컷 메싱
-                                      └─ run_refine_mesh()      -- (선택) 사진 광도일관성 보정
-                                            └─ keep_largest_component()  -- 부유 파편 제거
+주요 실측 결과 및 구현 규칙:
+1. 마스크 처리: 배경 누출 방지를 위해 densify 이전에 마스크를 적용하며, dilate=0으로 설정합니다.
+2. 노이즈 제거: DBSCAN은 발바닥 등 성긴 진짜 점을 삭제하므로 통계적 이상치 제거만 사용합니다.
+   (가시성 필터/재투영 분류는 크래시 및 노이즈 필터링 한계로 사용하지 않음)
+3. 메쉬 생성: 형태 보존을 위해 스무딩을 OFF(`--smooth 0`)하며, 크래시 방지를 위해 멀티스레드 수를 제한합니다.
+   생성 후 부유 파편은 최대 연결 요소만 남겨 제거합니다.
+4. 축 정렬: PCA 분산 순위 대신 상/하 평탄도 비대칭성을 측정하여 발바닥(-Y) 방향을 정렬합니다.
 
-OpenMVS는 pip 패키지가 아니라 별도 설치한 CLI 실행파일이 필요하다
-(`InterfaceCOLMAP`/`DensifyPointCloud`/`ReconstructMesh`/`RefineMesh`,
-CPU 빌드로 충분 -- 실측 확인, CUDA 불필요). 설치 경로는 `OPENMVS_BIN_DIR`
-환경변수로 지정하거나 `openmvs_bin` 인자로 직접 넘긴다. 설치 방법은
-README 참고.
-
-
+알려진 한계:
+- 발바닥 미촬영 프로토콜 특성상 접지면에 큰 구멍(30%대)이 남습니다.
+- 발목 부근의 뿔/스파이크 형태 돌출부 결함은 완전히 제거되지 않고 유지됩니다.
 """
 
 from __future__ import annotations
@@ -275,6 +271,9 @@ def run_reconstruct_mesh(
     *,
     openmvs_bin: str | Path | None = None,
     smooth: int = 0,
+    free_space_support: bool = False,
+    thickness_factor: float = 1.0,
+    quality_factor: float = 1.0,
     output_name: str = "scene_mesh.mvs",
 ) -> Path:
     """Delaunay 사면체화 + 그래프컷으로 점군을 메쉬로 만든다.
@@ -282,14 +281,63 @@ def run_reconstruct_mesh(
     Args:
         smooth: 기본 0(끔). OpenMVS 기본값(2)이 형상 정교함을 깎아낸다는
             육안 확인 있음(모듈 docstring 5번 참고) -- raw 메쉬가 더 정확했다.
+        free_space_support / thickness_factor / quality_factor: 그래프컷
+            가중치 튜닝(모듈 docstring 13번 참고) -- 기본값은 OpenMVS 자체
+            기본값 그대로(꺼짐/1.0), 아직 실측 검증 전이라 파이프라인
+            기본 경로는 안 건드린다.
     """
     bin_dir = _resolve_openmvs_bin(openmvs_bin)
-    _run_openmvs(
-        "ReconstructMesh.exe",
-        [scene_mvs.name, "-p", point_cloud_ply.name, "-o", output_name, "--smooth", str(smooth)],
-        workdir, bin_dir, "log_reconstruct_mesh.txt",
-    )
+    args = [
+        scene_mvs.name, "-p", point_cloud_ply.name, "-o", output_name, "--smooth", str(smooth),
+        "--thickness-factor", str(thickness_factor), "--quality-factor", str(quality_factor),
+    ]
+    if free_space_support:
+        args += ["--free-space-support", "1"]
+    _run_openmvs("ReconstructMesh.exe", args, workdir, bin_dir, "log_reconstruct_mesh.txt")
     return workdir / output_name.replace(".mvs", ".ply")
+
+
+def filter_point_cloud_visibility(
+    scene_mvs: Path,
+    point_cloud_ply: Path,
+    workdir: Path,
+    *,
+    threshold: int = -1,
+    openmvs_bin: str | Path | None = None,
+    output_name: str = "scene_dense_vf",
+) -> Path:
+    """OpenMVS 내장 가시성 기반 점군 필터(모듈 docstring 12번 참고, 아직 실측 검증 전).
+
+    `DensifyPointCloud`를 densify 없이 필터 전용 모드로 재호출한다 -- 소스
+    확인 결과 `--filter-point-cloud`는 `DenseReconstruction()`(실제 densify)
+    *이전*에 체크되므로, densify와 같은 호출에 넣으면 아무 점군도 없는
+    상태에서 필터가 실행돼 무효하다. 반드시 이미 만들어둔 점군을 `-p`로
+    불러들이는 별도 2차 호출이어야 한다.
+
+    Args:
+        point_cloud_ply: 필터링할 기존 점군(`clean_dense_point_cloud()` 출력 등).
+        threshold: 음수만 필터를 발동시킨다(0 이상이면 OpenMVS가 그냥
+            건너뜀 -- 소스 확인). 절댓값이 클수록 더 공격적으로 제거.
+            기본 -1은 보수적인 시작값 -- 실측 없이 더 큰 값을 기본으로
+            두지 않는다.
+
+    Returns:
+        필터링된 점군 경로(OpenMVS가 `<output_name>_filtered.ply`로 저장).
+    """
+    if threshold >= 0:
+        raise ValueError(f"threshold는 음수여야 필터가 발동합니다(소스 확인) -- 받은 값: {threshold}")
+    print(
+        "[dense][경고] filter_point_cloud_visibility()는 실측 결과(2026-08-11, test03) "
+        "이 출력을 run_reconstruct_mesh()에 넘기면 ACCESS_VIOLATION으로 재현 가능하게 "
+        "죽는 걸로 확인됐다(모듈 docstring 12번 참고) -- 원인 미해결. 계속 진행함."
+    )
+    bin_dir = _resolve_openmvs_bin(openmvs_bin)
+    _run_openmvs(
+        "DensifyPointCloud.exe",
+        [scene_mvs.name, "-p", point_cloud_ply.name, "-o", output_name, "--filter-point-cloud", str(threshold)],
+        workdir, bin_dir, "log_filter_point_cloud.txt",
+    )
+    return workdir / f"{output_name}_filtered.ply"
 
 
 def run_refine_mesh(
@@ -443,10 +491,9 @@ def align_principal_axes(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
     `fitting.fit_point_cloud_to_template()`가 하던 "템플릿 좌표계에 강체
     정렬"을 대체하는 최소 버전이다 -- 템플릿이 없어졌으니 맞출 대상이 없고,
     발 하나만 놓고는 축의 부호(양/음, 즉 어느 쪽이 발끝/뒤꿈치·위/아래인지)를
-    결정할 근거가 없다. 특히 위/아래(발바닥 방향)는 지금 마스킹으로 발바닥이
-    잘 안 찍혀서(모듈 상단 "알려진 한계" 참고) 법선 기반 평면 판정이
-    신뢰할 수 없어 시도하지 않았다 -- 축만 좌표계에 맞추고 방향(어느 쪽이
-    위/앞인지)은 실행마다 달라질 수 있다는 걸 감안할 것.
+    PCA만으로는 결정할 근거가 없다. 축만 좌표축에 맞추고 부호(어느 쪽이
+    위/앞인지)는 정하지 않는 최소 버전 -- 발바닥 방향까지 정하려면
+    `align_sole_down()`을 대신 쓸 것(발바닥 검출로 Y축 부호까지 정함).
 
     반사(reflection)가 섞이면 메쉬가 뒤집혀(면 방향이 반전돼) 나오므로,
     행렬식이 -1이면 마지막 축 부호를 뒤집어 순수 회전(det=+1)만 적용한다.
@@ -461,6 +508,109 @@ def align_principal_axes(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
     return aligned
 
 
+def _flatness(points: np.ndarray) -> float:
+    """점 뭉치의 평탄도 -- PCA 고유값 중 가장 작은 것 / 가장 큰 것.
+
+    0에 가까울수록 평평한 판 모양(발바닥 후보), 1에 가까울수록 등방적
+    (구형)이거나 굴곡진 형태(발등/발목 후보)다.
+    """
+    c = points - points.mean(axis=0)
+    cov = c.T @ c
+    ev = np.linalg.eigvalsh(cov)
+    return float(ev[0] / max(ev[-1], 1e-9))
+
+
+def find_sole_direction(
+    local_vertices: np.ndarray,
+    *,
+    candidate_axes: tuple[int, ...] = (1, 2),
+    percentiles: tuple[float, ...] = (8.0, 15.0, 20.0),
+) -> tuple[int, float]:
+    """PCA 정렬된 로컬 좌표에서 발바닥(접지면) 축과 방향(부호)을 추정한다.
+
+    핵심 가정: 발바닥은 지지면이라 상대적으로 평평하고, 반대쪽(발등/발목)은
+    아치·발목 돌출 때문에 굴곡이 있다 -- 즉 진짜 "높이(위/아래)" 축은 한쪽
+    끝은 평평하고 반대쪽 끝은 굴곡진 **비대칭**을 보이는 반면, "너비" 축은
+    양쪽(안쪽/바깥쪽 복사뼈 라인)이 둘 다 어느 정도 굴곡져 있어 비대칭이
+    약하다. PCA 분산 순위(축1=중간, 축2=최소)만으로 어느 게 높이인지
+    가정하지 않는다 -- 실측 확인(test03, 2026-08-11): SfM 재구성 노이즈
+    때문에 분산 순위가 실제 길이/너비/높이 순서와 안 맞는 경우가 있었다
+    (축1/축2 고유값비가 1.6배로, 폭:높이 실측 비율(약 1.5~2배 표준편차,
+    고유값으론 제곱이라 3배 이상 기대)보다 훨씬 덜 벌어짐). 대신 두 후보
+    축 모두에 대해 이 평탄도 비대칭을 실제로 측정해, 비대칭이 더 크고
+    percentile 크기에 걸쳐(8/15/20%) 더 일관된 쪽을 높이 축으로 뽑는다.
+
+    Args:
+        local_vertices: PCA 정렬 로컬 좌표(중심이 원점, 열 순서가 분산
+            내림차순인 축과 일치해야 함) -- 보통 `align_sole_down()`이
+            내부에서 만들어 넘긴다.
+        candidate_axes: 높이 축 후보 열 인덱스. 기본 (1, 2) -- 축0(최대
+            분산)은 발 길이 축이 거의 확실해 후보에서 제외.
+
+    Returns:
+        (height_axis_idx, sign) -- `local_vertices[:, height_axis_idx] * sign`이
+        "위(발등 쪽)"가 되도록 하는 부호. 호출자는 이 축을 최종 Y로 보내고
+        부호를 반전해(발바닥이 -Y) 정렬할 것.
+    """
+    best_axis, best_score, best_sign = candidate_axes[0], -1.0, 1.0
+    for axis_idx in candidate_axes:
+        h = local_vertices[:, axis_idx]
+        asymmetries: list[float] = []
+        votes: list[float] = []
+        for pct in percentiles:
+            lo = local_vertices[h <= np.percentile(h, pct)]
+            hi = local_vertices[h >= np.percentile(h, 100.0 - pct)]
+            if len(lo) < 10 or len(hi) < 10:
+                continue
+            f_lo, f_hi = _flatness(lo), _flatness(hi)
+            asymmetries.append(abs(f_lo - f_hi))
+            votes.append(1.0 if f_lo < f_hi else -1.0)  # lo가 더 평평하면 "위"는 +쪽
+        if not asymmetries:
+            continue
+        score = float(np.mean(asymmetries))
+        sign = 1.0 if sum(v > 0 for v in votes) >= len(votes) / 2 else -1.0
+        if score > best_score:
+            best_axis, best_score, best_sign = axis_idx, score, sign
+    return best_axis, best_sign
+
+
+def align_sole_down(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
+    """`align_principal_axes()`의 다음 단계 -- 발바닥까지 검출해 최종 좌표계를
+    X=길이축, Y=높이축(발바닥이 -Y), Z=너비축으로 맞춘다(중심은 원점).
+
+    `find_sole_direction()`(모듈 docstring 참고)으로 높이 축과 부호를
+    실측 기반 평탄도 비대칭으로 추정한다. **주의**: 지금 촬영 프로토콜은
+    발바닥을 직접 못 찍어(모듈 상단 "알려진 한계" 참고) 그 부위 표면이
+    그래프컷이 메운 결과일 수 있다 -- 그래도 실측 확인(test03,
+    2026-08-11)해보니 발바닥 쪽이 발등/발목 쪽보다 뚜렷이 더 평평하게
+    나와 이 휴리스틱이 신호를 잡아낸다. 다만 매 실행마다 검증된 건
+    아니므로, 최종 산출물에 쓰기 전 실제 뷰어로 확인할 것.
+    """
+    centroid = mesh.vertices.mean(axis=0)
+    c = mesh.vertices - centroid
+    cov = c.T @ c
+    eigvals, eigvecs = np.linalg.eigh(cov)
+    order = np.argsort(eigvals)[::-1]
+    sorted_axes = eigvecs[:, order]
+    local = c @ sorted_axes
+
+    height_idx, sign = find_sole_direction(local)
+    width_idx = 2 if height_idx == 1 else 1
+
+    final_axes = np.stack([
+        sorted_axes[:, 0],
+        sorted_axes[:, height_idx] * sign,  # sign은 "축*sign=위(발등)" 정의(find_sole_direction 참고) -- 그대로 Y로
+        sorted_axes[:, width_idx],
+    ], axis=1)
+    if np.linalg.det(final_axes) < 0:
+        final_axes = final_axes.copy()
+        final_axes[:, -1] *= -1.0  # 너비축(이미 결정 근거 없음) 부호만 뒤집어 순수 회전 유지
+
+    aligned = mesh.copy()
+    aligned.vertices = c @ final_axes
+    return aligned
+
+
 def run_dense_pipeline(
     *,
     sparse_dir: Path,
@@ -471,6 +621,10 @@ def run_dense_pipeline(
     refine: bool = False,
     postprocess_dmaps: int = DEFAULT_POSTPROCESS_DMAPS,
     max_threads: int = DEFAULT_MAX_THREADS,
+    visibility_filter_threshold: int | None = None,
+    free_space_support: bool = False,
+    thickness_factor: float = 1.0,
+    quality_factor: float = 1.0,
 ) -> Path:
     """위 단계 전부를 엮는 오케스트레이션. 최종 메쉬 경로를 반환한다.
 
@@ -484,6 +638,12 @@ def run_dense_pipeline(
         refine: RefineMesh(사진 광도일관성 보정)까지 돌릴지. 기본 False --
             전체 시간의 70% 이상을 차지하는 병목이라(모듈 docstring 7번),
             빠른 확인이 필요하면 끄고 최종 산출물만 켤 것.
+        visibility_filter_threshold: `filter_point_cloud_visibility()`를
+            추가로 돌릴지(모듈 docstring 12번 참고). `None`(기본)이면 안
+            돌림 -- 아직 실측 검증 전. 음수 값(예: -1)을 주면 활성화.
+        free_space_support / thickness_factor / quality_factor:
+            `run_reconstruct_mesh()`로 그대로 전달(모듈 docstring 13번 참고).
+            아직 실측 검증 전이라 기본값은 OpenMVS 기본값 그대로.
     """
     # OpenMVS 서브프로세스는 -w(workdir)를 cwd로 실행되므로, 그 외 입력 경로는
     # 전부 절대경로로 넘겨야 한다 -- 상대경로를 그대로 두면 cwd가 바뀐 뒤
@@ -505,15 +665,27 @@ def run_dense_pipeline(
     )
     cleaned_ply = openmvs_dir / "scene_dense_cleaned.ply"
     clean_dense_point_cloud(dense_ply, cleaned_ply)
-    mesh_ply = run_reconstruct_mesh(scene_mvs, cleaned_ply, openmvs_dir, openmvs_bin=openmvs_bin)
+
+    mesh_input_ply = cleaned_ply
+    if visibility_filter_threshold is not None:
+        mesh_input_ply = filter_point_cloud_visibility(
+            scene_mvs, cleaned_ply, openmvs_dir,
+            threshold=visibility_filter_threshold, openmvs_bin=openmvs_bin,
+        )
+
+    mesh_ply = run_reconstruct_mesh(
+        scene_mvs, mesh_input_ply, openmvs_dir, openmvs_bin=openmvs_bin,
+        free_space_support=free_space_support, thickness_factor=thickness_factor,
+        quality_factor=quality_factor,
+    )
 
     if refine:
         mesh_ply = run_refine_mesh(scene_mvs, mesh_ply, openmvs_dir, openmvs_bin=openmvs_bin)
 
-    # 뿔/스파이크는 이미 `clean_dense_point_cloud()`에서 메싱 *이전*에 점
-    # 단위로 제거됐다(모듈 docstring 11번) -- 메쉬가 만들어진 뒤 사후
-    # 수술하면 절단면 위상이 지저분해지는 게 실측 확인돼 그 방식은 버렸다.
-    # 여기서는 이미 분리된 부유 파편만 추가로 정리한다.
+    # 뿔/스파이크 사후 프루닝(prune_thin_protrusions)은 메쉬 위상을 망가뜨려
+    # 버렸다(모듈 docstring 11번) -- 점 단위 사전 제거(clean_dense_point_cloud
+    # 의 prune_protrusions, 기본 꺼짐) 또는 위 visibility_filter_threshold 중
+    # 하나를 실측으로 검증해 켤 것. 여기서는 이미 분리된 부유 파편만 정리한다.
     mesh = trimesh.load(mesh_ply, process=False)
     mesh, faces_before, faces_after = keep_largest_component(mesh)
     if faces_after < faces_before:
