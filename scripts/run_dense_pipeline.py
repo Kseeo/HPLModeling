@@ -74,6 +74,19 @@ def main(argv: list[str] | None = None) -> int:
                          help="저텍스처 평면 공백 메우기(--postprocess-dmaps)를 끈다.")
     parser.add_argument("--max-threads", type=int, default=8,
                          help="DensifyPointCloud 스레드 상한(기본 8) — 원인불명 간헐적 크래시 방지용(실측 근거 dense.py 참고).")
+    parser.add_argument(
+        "--visibility-filter-threshold", type=int, default=None,
+        help="OpenMVS 내장 가시성 필터(--filter-point-cloud) 임계값(음수, 예: -1). "
+             "생략(기본)하면 안 돌림 — dense.py 모듈 docstring 12번 참고, 아직 실측 검증 전.",
+    )
+    parser.add_argument(
+        "--free-space-support", action="store_true",
+        help="ReconstructMesh --free-space-support 켬 — dense.py 모듈 docstring 13번 참고, 아직 실측 검증 전.",
+    )
+    parser.add_argument("--thickness-factor", type=float, default=1.0,
+                         help="ReconstructMesh --thickness-factor(기본 1.0=OpenMVS 기본값).")
+    parser.add_argument("--quality-factor", type=float, default=1.0,
+                         help="ReconstructMesh --quality-factor(기본 1.0=OpenMVS 기본값).")
     args = parser.parse_args(argv)
 
     run_dir: Path = args.run_dir
@@ -97,6 +110,10 @@ def main(argv: list[str] | None = None) -> int:
         refine=args.refine,
         postprocess_dmaps=args.postprocess_dmaps,
         max_threads=args.max_threads,
+        visibility_filter_threshold=args.visibility_filter_threshold,
+        free_space_support=args.free_space_support,
+        thickness_factor=args.thickness_factor,
+        quality_factor=args.quality_factor,
     )
     print(f"\n최종 메쉬: {mesh_path}")
     return 0

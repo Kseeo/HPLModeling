@@ -7,26 +7,6 @@
                     └─ masking.generate_masks(dilate=0)  — dense 전용 마스크
                           └─ dense.run_dense_pipeline()  — OpenMVS densify + 메싱 + 파편 제거
                                 └─ (선택) 스케일 보정 — fitting.measured_length() 기준
-
-2026-08-10 결정: 예전엔 여기서 `fitting.fit_point_cloud_to_template()`로
-`FootMeshDeformer` 템플릿을 계측치에 맞춰 워핑했지만, 다운스트림 GNN 예측이
-정점 대응(vertex correspondence)을 요구하지 않는다는 판단에 따라 dense MVS
-메쉬로 완전히 대체했다 — SSM/deformer 둘 다 템플릿 토폴로지가 필요해서
-겪었던 제약이 사라진다. `fitting.py`에서 유일하게 남겨 쓰는 건
-`measured_length()`(PCA 기반 길이 측정, 템플릿과 무관하게 독립적으로 동작)
-뿐이다 — SfM은 절대 축척이 없어서(카메라 파라미터 기준 임의 단위) 이거라도
-없으면 최종 메쉬가 mm 단위와 무관한 임의 크기로 나온다.
-
-알려진 한계(2026-08-10 test03 실측, `dense.py` docstring 10번 참고): 지금
-촬영 프로토콜(발을 얹어두고 주변을 도는 방식)로는 발바닥 접지면을 어떤
-카메라도 못 봐서, 최종 메쉬에 정상 스캔(`data/scans/`, 구멍 비율 5~9%) 대비
-훨씬 큰 구멍(30%대, 발바닥 전체 규모)이 남는다 — 촬영 프로토콜을 바꾸기
-전까지는 코드로 못 고치는 문제라 그대로 둔다.
-
-각 단계의 튜닝 근거/기본값은 해당 모듈 docstring 참고. 이 함수는 그것들을
-엮기만 하고 새 로직은 추가하지 않는다 — 단계별로 따로 돌리고 싶으면(중간
-결과를 실제 뷰어로 확인하는 등) 각 모듈을 직접 불러도 된다, 이 함수는
-편의용이다.
 """
 
 from __future__ import annotations
@@ -100,6 +80,10 @@ def run_pipeline(
     refine: bool = False,
     postprocess_dmaps: int = dense.DEFAULT_POSTPROCESS_DMAPS,
     dense_max_threads: int = dense.DEFAULT_MAX_THREADS,
+    visibility_filter_threshold: int | None = None,
+    free_space_support: bool = False,
+    thickness_factor: float = 1.0,
+    quality_factor: float = 1.0,
 ) -> PipelineResult:
     """영상/사진 -> 발/피부 마스크 -> sparse SfM -> dense MVS -> 스케일 보정 메쉬.
 
@@ -125,9 +109,12 @@ def run_pipeline(
         cluster: `cleaned_points.ply`(QA용 sparse 정리 산출물)에 DBSCAN
             군집화를 추가로 적용할지. 최종 dense 메쉬에는 영향 없다 — dense
             경로는 DBSCAN을 의도적으로 안 쓴다(`dense.py` docstring 3번 참고).
-        openmvs_bin / refine / postprocess_dmaps / dense_max_threads:
-            `dense.run_dense_pipeline()`으로 그대로 전달. 튜닝 근거는
-            `dense.py` 모듈 docstring 참고.
+        openmvs_bin / refine / postprocess_dmaps / dense_max_threads /
+        visibility_filter_threshold / free_space_support / thickness_factor /
+        quality_factor: `dense.run_dense_pipeline()`으로 그대로 전달. 튜닝
+            근거는 `dense.py` 모듈 docstring 참고 — 뒤 네 개(가시성 필터,
+            메쉬 정밀도 가중치)는 2026-08-11 시점 아직 실측 검증 전이라
+            기본값은 전부 "안 건드림"이다.
 
     Returns:
         산출물 경로와 요약 통계를 담은 `PipelineResult`.
@@ -231,6 +218,9 @@ def run_pipeline(
         sparse_dir=sparse_dir, images_dir=resolved_images_dir, masks_dir=dense_masks_dir,
         workdir=dense_workdir, openmvs_bin=openmvs_bin, refine=refine,
         postprocess_dmaps=postprocess_dmaps, max_threads=dense_max_threads,
+        visibility_filter_threshold=visibility_filter_threshold,
+        free_space_support=free_space_support, thickness_factor=thickness_factor,
+        quality_factor=quality_factor,
     )
 
     # 부유 파편 제거(keep_largest_component)는 dense.run_dense_pipeline() 안에서
@@ -238,9 +228,12 @@ def run_pipeline(
     # 덩어리인 메쉬에 대한 무의미한 재호출이 된다.
     mesh = trimesh.load(mesh_ply, process=False)
 
-    # PCA 주축 정렬(X=최장축) — 템플릿이 없어져 위/아래·앞/뒤(부호)는 못 정하고
-    # 축만 맞춘다(`dense.align_principal_axes()` docstring 참고).
-    mesh = dense.align_principal_axes(mesh)
+    # 축 정렬(X=길이) + 발바닥 검출(Y=높이, 발바닥이 -Y) — 템플릿이 없어져
+    # 앞/뒤(발끝 방향)는 여전히 못 정하지만, 평탄도 비대칭 휴리스틱으로
+    # 위/아래는 결정한다(`dense.align_sole_down()` docstring 참고, 2026-08-11
+    # 실측: test03에서 신호 확인됨 — 매 실행 검증된 건 아니라 실사용 전
+    # 뷰어로 확인할 것).
+    mesh = dense.align_sole_down(mesh)
 
     resolved_reference_length_mm = reference_length_mm
     if resolved_reference_length_mm is None:
