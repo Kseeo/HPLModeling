@@ -6,7 +6,7 @@
                     └─ cleaning.clean_point_cloud()  — QA용 sparse 정리(최종 메쉬엔 안 씀)
                     └─ masking.generate_masks(dilate=0)  — dense 전용 마스크
                           └─ dense.run_dense_pipeline()  — OpenMVS densify + 메싱 + 파편 제거
-                                └─ (선택) 스케일 보정 — fitting.measured_length() 기준
+                                └─ (선택) 스케일 보정 — geometry.measured_length() 기준
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ import trimesh
 
 from ..exceptions import CaptureQualityError
 from . import cleaning, dense, frame_quality, masking, reconstruction
-from .fitting import measured_length
+from .geometry import measured_length
 
 #: SfM에 넘길 최소 프레임 수 — `reconstruction.extract_frames()`의 "최소 8장
 #: 권장" 가이드와 맞춘다. QC 게이트 통과 후 이보다 적게 남으면 비싼 SfM을
@@ -26,8 +26,7 @@ from .fitting import measured_length
 MIN_CANDIDATE_FRAMES = 8
 
 #: 스케일 보정 기준 삼는 자기신고 발길이가 없을 때 쓰는 임시값(mm). 절대
-#: 축척이 아니라 형태 비교/시각화용 placeholder — `fitting.py`의 기존 관례를
-#: 그대로 따른다.
+#: 축척이 아니라 형태 비교/시각화용 placeholder.
 DEFAULT_REFERENCE_LENGTH_MM = 250.0
 
 

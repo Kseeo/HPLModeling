@@ -1,7 +1,9 @@
-"""Sparse SfM 결과 기반 OpenMVS Dense 포인트클라우드/메쉬 복원 모듈 (선택적)
+"""Sparse SfM 결과 기반 OpenMVS Dense 포인트클라우드/메쉬 복원 모듈.
 
-`fitting.py` 동작에는 이 모듈이 필요 없으며, 시각화/QA/고정밀 3D 메쉬가 필요할 때만 사용합니다.
-OpenMVS CLI 실행파일이 필요하며(`OPENMVS_BIN_DIR` 설정), CUDA 없이 CPU 빌드로 동작합니다.
+메쉬 생성기 본체(2026-08-11부터, 템플릿 워프/SSM 대신 이 모듈이 만드는 dense
+메쉬를 다듬고 경량화하는 쪽으로 결론남 — `archive/deformer_ssm_pipeline/`
+참고). OpenMVS CLI 실행파일이 필요하며(`OPENMVS_BIN_DIR` 설정), CUDA 없이
+CPU 빌드로 동작합니다.
 
 파이프라인 흐름:
     undistort_for_dense() -> convert_masks_for_openmvs() -> run_interface_colmap()
@@ -34,7 +36,7 @@ import pycolmap
 import trimesh
 from scipy.spatial import cKDTree
 
-from ..ssm import pca_axes
+from .geometry import pca_axes
 from .reconstruction import filter_outlier_points
 
 #: OpenMVS CLI 실행파일이 있는 폴더. 환경변수로 덮어쓸 것 -- 설치 방법은 README 참고.

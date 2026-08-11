@@ -1,65 +1,20 @@
-"""foot_engine — 2D 랜드마크 기반 3D 발 메쉬 파라메트릭 변형 엔진.
+"""foot_engine — 2D 사진/영상 -> dense MVS 3D 발 메쉬 파이프라인.
 
 Quick start::
 
-    from foot_engine import FootMeshDeformer
+    from foot_engine.sfm.pipeline import run_pipeline
 
-    deformer = FootMeshDeformer("data/templates/base_foot_template.stl")
-    mesh = deformer.deform_mesh(landmarks_dict)
-    deformer.export_mesh("data/output/output_deformed_foot.stl")
-    print(deformer.last_report.summary_lines())
+    result = run_pipeline(video_path="data/samples/test00.mp4", workdir="data/output/run00")
+
+랜드마크 기반 템플릿 워프(`FootMeshDeformer`)/SSM 경로는 2026-08-11 다음
+결론에 따라 `archive/deformer_ssm_pipeline/`로 옮겼다: SSM은 대응점 노이즈로
+메쉬 생성기로 못 쓴다는 게 이미 확인돼 있었고, 템플릿 워프까지 유지할 이유가
+약해져 dense MVS(`foot_engine.sfm`) 결과물 자체를 다듬고 경량화하는 쪽이
+낫다고 판단함. 코드는 지우지 않고 archive/에 그대로 남아 있다(참고/복구용).
 """
 
 from __future__ import annotations
 
-from .config import DeformConfig
-from .deformer import FootMeshDeformer
-from .exceptions import (
-    DeformationError,
-    ExportError,
-    FootEngineError,
-    LandmarkValidationError,
-    MeshQualityError,
-    ScanDatasetError,
-    TemplateLoadError,
-)
-from .landmarks import extract_measurements
-from .scan_dataset import ScanRecord, category_counts, load_manifest, side_counts
-from .schemas import (
-    DeformationReport,
-    FootMeasurements,
-    LandmarkPayload,
-    QualityReport,
-    parse_payload,
-)
-from .service import DeformationService, run_deformation
-from .template_factory import build_reference_foot, save_reference_template
+__version__ = "0.2.0"
 
-__version__ = "0.1.0"
-
-__all__ = [
-    "FootMeshDeformer",
-    "DeformConfig",
-    "DeformationService",
-    "run_deformation",
-    "FootMeasurements",
-    "LandmarkPayload",
-    "DeformationReport",
-    "QualityReport",
-    "parse_payload",
-    "extract_measurements",
-    "build_reference_foot",
-    "save_reference_template",
-    "FootEngineError",
-    "TemplateLoadError",
-    "LandmarkValidationError",
-    "DeformationError",
-    "MeshQualityError",
-    "ExportError",
-    "ScanDatasetError",
-    "ScanRecord",
-    "load_manifest",
-    "category_counts",
-    "side_counts",
-    "__version__",
-]
+__all__ = ["__version__"]

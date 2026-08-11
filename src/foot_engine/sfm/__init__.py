@@ -1,19 +1,19 @@
-"""SfM(Structure-from-Motion) 기반 2D 사진/영상 -> 3D 발 메쉬 파이프라인.
+"""SfM(Structure-from-Motion) 기반 2D 사진/영상 -> dense MVS 3D 발 메쉬 파이프라인.
 
-외부 포토그래메트리를 대체하는 in-house 경로다. 6단계로 구성된다.
+외부 포토그래메트리(VRIN)를 대체하는 in-house 경로다. 5단계로 구성된다.
 
     frame_quality.assess_frames()     — SfM 전, 프레임별 절대기준 QC(파일 손상/해상도/노출)
         └─ reconstruction.run_sparse_sfm()  — 사진/영상 -> 카메라 포즈 + sparse 포인트클라우드
               └─ masking.generate_masks()   — 사진별 발/피부 마스크, 프레임 필터링
-                    └─ cleaning.clean_point_cloud()  — 마스크 기반 배경 제거 + 이상치 제거 + 군집화
-                          └─ fitting.fit_point_cloud_to_template()  — 좌우 정렬 + 계측 + 템플릿 워프
-                                └─ pipeline.run_pipeline()  — 위 다섯 단계를 한 번에 엮는 오케스트레이션
+                    └─ cleaning.clean_point_cloud()  — 마스크 기반 배경 제거 + 이상치 제거 + 군집화(QA용, 최종 메쉬엔 안 씀)
+                          └─ dense.run_dense_pipeline()  — OpenMVS densify + 메싱 + 파편 제거
+                                └─ pipeline.run_pipeline()  — 위 전부를 한 번에 엮는 오케스트레이션
 
-`fitting.py` 경로는 스칼라 계측치 몇 개만 있으면 되므로 위 다섯 단계가 전부다.
-실제 3D 메쉬(시각화/QA용)가 필요하면 `dense.py`(OpenMVS 기반 dense MVS,
-별도 CLI 설치 필요, `run_dense_pipeline()`)를 선택적으로 이어붙인다 —
-`sparse_dir`(run_sparse_sfm 결과)와 `masks_dir`(generate_masks, dilate=0)만
-있으면 된다. `dense.py` 모듈 docstring에 실측 검증된 튜닝 근거가 정리돼 있다.
+메쉬 생성기는 dense MVS 하나다(2026-08-11, 템플릿 워프/SSM 경로는
+`archive/deformer_ssm_pipeline/`로 옮김 — 대응점 노이즈로 SSM이 무산된 뒤
+템플릿 워프까지 유지할 이유가 약해져, dense 메쉬 자체를 다듬고
+경량화하는 쪽으로 결론남). `geometry.py`는 그 결정 이후에도 남은 유일한
+의존성(스케일 추정용 `pca_axes`/`measured_length`)을 담는다.
 
 알려진 한계(코드로 못 고치는 촬영 조건):
     - 촬영 내내 발이 완전히 고정돼야 한다(의자 위에 올려두는 등)
@@ -45,13 +45,6 @@ from .dense import (
     run_refine_mesh,
     undistort_for_dense,
 )
-from .fitting import (
-    fit_point_cloud_to_template,
-    measure_point_cloud,
-    measured_length,
-    mirror_points,
-    rigid_prealign_points,
-)
 from .frame_quality import (
     FrameQualityResult,
     assess_frame,
@@ -60,6 +53,7 @@ from .frame_quality import (
     print_summary,
     summarize,
 )
+from .geometry import measured_length, pca_axes
 from .masking import generate_masks, load_skin_segmenter, skin_only_mask
 from .pipeline import PipelineResult, run_pipeline
 from .reconstruction import (
@@ -97,12 +91,9 @@ __all__ = [
     "geometric_keep_mask",
     "keep_largest_cluster",
     "clean_point_cloud",
-    # fitting
+    # geometry
     "measured_length",
-    "mirror_points",
-    "rigid_prealign_points",
-    "measure_point_cloud",
-    "fit_point_cloud_to_template",
+    "pca_axes",
     # pipeline
     "run_pipeline",
     "PipelineResult",
