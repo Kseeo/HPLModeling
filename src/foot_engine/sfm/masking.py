@@ -23,6 +23,9 @@ rembg가 잡아낸 "사람" 영역 안에서 옷/장신구만 추가로 제거�
 한계(실측 확인, 완전히 해결되지 않음): 피부-옷 경계선 자체가 대비가 강해
 고리 모양 잔여 오염이 남을 수 있다.
 촬영 시 옷이 보이지 않도록 찍는 것이 근본적인 해결책
+
+세그멘테이션/피부 정제가 애매하게 실패한 프레임은 원본 전체나 정제 전
+마스크로 대체하지 않고 후보에서 제외한다(배경이 섞여 들어갈 수 있어서).
 """
 
 from __future__ import annotations
@@ -89,6 +92,47 @@ def skin_only_mask(segmenter, bgr_image: np.ndarray, *, erode: int = 8) -> np.nd
     return skin
 
 
+def remove_thin_appendages(mask: np.ndarray, *, erode_size: int = 21) -> np.ndarray:
+    """마스크에서 가는 목으로 겨우 이어진 돌출부(오분류된 배경)를 잘라낸다.
+
+    Opening by reconstruction: 침식으로 얇은 연결부를 끊고, 가장 큰 연결요소만
+    씨앗으로 남긴 뒤, 원본 마스크 경계를 넘지 않는 선에서 다시 팽창시켜
+    복원한다 — 발 경계 자체는 원래 모양대로 복원되고 끊어진 돌출부만 안 자란다.
+
+    한계(실측 확인): 오분류된 배경이 발과 폭 넓게 이어져 있으면(가는 목이
+    아니라) 못 거른다 — test03 frame_00060에서 무효 확인됨.
+
+    Args:
+        erode_size: 끊어낼 "목"의 최대 굵기(px) 기준.
+
+    Returns:
+        돌출부가 제거된 마스크(0/255).
+    """
+    if erode_size <= 0 or not mask.any():
+        return mask
+
+    kernel = np.ones((erode_size, erode_size), np.uint8)
+    eroded = cv2.erode(mask, kernel)
+    n_labels, labels = cv2.connectedComponents(eroded)
+    if n_labels <= 1:
+        return mask  # 침식으로 씨앗이 하나도 안 남음 -- 안전하게 원본 유지
+
+    sizes = [int((labels == i).sum()) for i in range(1, n_labels)]
+    largest_label = 1 + int(np.argmax(sizes))
+    seed = np.where(labels == largest_label, np.uint8(255), np.uint8(0))
+
+    # geodesic dilation: 원본 마스크를 넘지 않는 선에서 씨앗을 반복 팽창.
+    # 재구성용 커널을 침식 때와 같은 크기로 써서 수렴을 빠르게 한다 --
+    # 매 단계 원본과 AND로 잘라내므로 커널이 커도 경계가 흐트러지지 않는다.
+    prev = seed
+    while True:
+        grown = cv2.dilate(prev, kernel)
+        grown = cv2.bitwise_and(grown, mask)
+        if np.array_equal(grown, prev):
+            return grown
+        prev = grown
+
+
 def generate_masks(
     images_dir: Path,
     out_dir: Path,
@@ -104,28 +148,26 @@ def generate_masks(
 ) -> dict:
     """이미지 폴더(또는 그 안 일부)의 발/피부 마스크를 생성해 `out_dir`에 저장한다.
 
+    세그멘테이션/피부 정제가 애매하게 실패하면 원본 전체나 정제 전 마스크로
+    대체하지 않고 그 프레임을 후보에서 제외한다 — 배경이 섞여 들어갈 수 있어서.
+
     Args:
         images_dir: 원본 이미지 폴더.
         out_dir: 마스크(`<파일명>.png`) 저장 폴더.
-        names: 지정하면 이 파일들만 처리(다른 QC 게이트를 이미 통과한 후보 목록 등).
-            None이면 `images_dir`의 전체 이미지 파일.
+        names: 지정하면 이 파일들만 처리. None이면 `images_dir`의 전체 이미지.
         model: rembg 모델 이름.
         dilate: 마스크 경계 팽창 폭(px).
-        min_coverage: 이 비율 미만이면 세그멘테이션 실패로 보고 원본 전체를 사용
-            (`reject_coverage`보다는 커야 함 — 그 사이는 "애매하니 안전하게 전체 사용").
-        reject_coverage: 이 비율 미만이면 세그멘테이션 실패가 아니라 애초에 발이
-            프레임에 없다고 보고(카메라가 다른 곳을 비췄거나 초점을 벗어난 경우 등)
-            해당 프레임을 후보 목록에서 아예 제외한다. `min_coverage`보다 훨씬
-            낮게 잡아야 한다 — 발이 실제로 있는데 세그멘테이션만 살짝 실패한
-            프레임까지 통째로 버리면 안 되기 때문.
+        min_coverage: 이 비율 미만이면 세그멘테이션 실패로 보고 제외.
+        reject_coverage: 이 비율 미만이면 발 자체가 안 보인다고 보고 제외
+            (`min_coverage`보다 낮게).
         skin_refine: MediaPipe로 옷/장신구를 추가 제외할지.
         skin_model: MediaPipe Selfie Multiclass 모델(.tflite) 경로.
         skin_erode: 피부 마스크 경계를 깎는 폭(px) — 옷-피부 경계선 잔여 오염 완화용.
 
     Returns:
-        {"total": 처리한 장 수, "fallback": 원본 전체를 쓴 장 수,
-         "refined": 피부 정제가 적용된 장 수, "rejected": 제외된 장 수,
-         "rejected_names": 제외된 파일명 목록(정렬됨)}.
+        {"total": 처리한 장 수, "refined": 피부 정제가 적용된 장 수,
+         "rejected": 제외된 장 수, "rejected_names": 제외된 파일명 목록,
+         "rejected_reasons": 사유별 집계(no_foot/low_coverage/skin_refine_collapsed)}.
     """
     if not images_dir.is_dir():
         raise FileNotFoundError(f"이미지 폴더가 없습니다: {images_dir}")
@@ -145,45 +187,50 @@ def generate_masks(
         paths = [images_dir / name for name in names]
     else:
         paths = sorted(p for p in images_dir.iterdir() if p.suffix.lower() in IMAGE_EXTS)
-    fallback_count = 0
     refined_count = 0
     rejected_names: list[str] = []
+    rejected_reasons = {"no_foot": 0, "low_coverage": 0, "skin_refine_collapsed": 0}
     for path in paths:
         img = cv2.imread(str(path))
         rgba = remove(img, session=session)  # rembg는 BGR ndarray도 그대로 받는다
         alpha = rgba[:, :, 3]
         mask = (alpha > 10).astype(np.uint8) * 255
+        rejected = False
 
         coverage = (mask > 0).mean()
         if coverage < reject_coverage:
-            # 세그멘테이션 실패가 아니라 애초에 발이 프레임에 안 보이는 경우로 본다
-            # — 원본 전체를 쓰면 배경이 통째로 SfM/점군에 섞여 들어가므로, 이
-            # 프레임은 마스크만 빈 채로 남기고 후보 목록에서 제외한다.
+            # 발이 아예 프레임에 없음.
+            rejected_reasons["no_foot"] += 1
+            rejected = True
+        elif coverage < min_coverage:
+            # 세그멘테이션이 애매하게 실패.
+            rejected_reasons["low_coverage"] += 1
+            rejected = True
+        elif skin_segmenter is not None:
+            # rembg가 잡은 "사람" 영역 안에서 옷/장신구만 추가로 뺀다.
+            skin = skin_only_mask(skin_segmenter, img, erode=skin_erode)
+            refined = cv2.bitwise_and(mask, skin)
+            if (refined > 0).mean() >= min_coverage:
+                mask = refined
+                refined_count += 1
+            else:
+                # 정제 결과가 너무 작아짐 — 정제 전 마스크로 되돌아가면 배경이
+                # 섞일 수 있어 이 프레임을 제외한다.
+                rejected_reasons["skin_refine_collapsed"] += 1
+                rejected = True
+
+        if rejected:
             mask = np.zeros(mask.shape, dtype=np.uint8)
             rejected_names.append(path.name)
-        elif coverage < min_coverage:
-            # 세그멘테이션이 애매하게 실패한 경우 — 안전하게 원본 전체를 사용
-            mask = np.full(mask.shape, 255, dtype=np.uint8)
-            fallback_count += 1
-        else:
-            if skin_segmenter is not None:
-                # rembg가 잡은 "사람" 영역 안에서 옷/장신구(예: 소매 커프)만 추가로 뺀다.
-                # 정제 후 커버리지가 너무 작아지면(옷을 사람으로 오인해 거의 다 날아간
-                # 경우 등) 오히려 발이 통째로 사라질 위험이 있어 안전장치로 원래 마스크를 쓴다.
-                skin = skin_only_mask(skin_segmenter, img, erode=skin_erode)
-                refined = cv2.bitwise_and(mask, skin)
-                if (refined > 0).mean() >= min_coverage:
-                    mask = refined
-                    refined_count += 1
-            if kernel is not None:
-                mask = cv2.dilate(mask, kernel)
+        elif kernel is not None:
+            mask = cv2.dilate(mask, kernel)
 
         cv2.imwrite(str(out_dir / f"{path.name}.png"), mask)
 
     return {
         "total": len(paths),
-        "fallback": fallback_count,
         "refined": refined_count,
         "rejected": len(rejected_names),
         "rejected_names": sorted(rejected_names),
+        "rejected_reasons": rejected_reasons,
     }

@@ -108,16 +108,43 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--visibility-filter-threshold", type=int, default=None,
         help="OpenMVS 내장 가시성 필터(--filter-point-cloud) 임계값(음수, 예: -1). "
-             "생략(기본)하면 안 돌림 — dense.py 모듈 docstring 12번 참고, 아직 실측 검증 전.",
+             "생략(기본)하면 안 돌림 — dense.py 모듈 docstring 5번 참고, 발바닥 보존은 "
+             "확인됐지만 경계 노이즈 제거 효과는 육안 검증 필요.",
+    )
+    parser.add_argument(
+        "--grazing-filter-min-score", type=float, default=None,
+        help="법선-시선 grazing-angle 필터(filter_grazing_points) 임계값(0~1, 예: 0.3). "
+             "생략(기본)하면 안 돌림 — dense.py의 filter_grazing_points() docstring 참고, "
+             "발바닥 보존은 확인됐지만 경계 노이즈 제거 효과는 육안 검증 필요.",
+    )
+    parser.add_argument(
+        "--reprojection-consistency-min-vote", type=float, default=None,
+        help="전체 카메라 재투영 다수결 필터(filter_by_reprojection_consistency) 임계값(0~1, "
+             "예: 0.6). 생략(기본)하면 안 돌림 — 실측(test03, 배경 오염): 0.6에서 오염 후보 "
+             "44%% 제거/발 오제거 11%%.",
     )
     parser.add_argument(
         "--free-space-support", action="store_true",
-        help="ReconstructMesh --free-space-support 켬 — dense.py 모듈 docstring 13번 참고, 아직 실측 검증 전.",
+        help="ReconstructMesh --free-space-support 켬 — 실측 확인: 메쉬가 뾰족하게 뒤틀리는 "
+             "부작용이 있어 권장 안 함(dense_mvs_results/README.md 참고).",
     )
     parser.add_argument("--thickness-factor", type=float, default=1.0,
-                         help="ReconstructMesh --thickness-factor(기본 1.0=OpenMVS 기본값).")
+                         help="ReconstructMesh --thickness-factor(기본 1.0=OpenMVS 기본값). "
+                              "실측 확인: 2.0에서도 위 free-space-support와 같은 부작용 발생.")
     parser.add_argument("--quality-factor", type=float, default=1.0,
                          help="ReconstructMesh --quality-factor(기본 1.0=OpenMVS 기본값).")
+    parser.add_argument("--refine-decimate", type=float, default=1.0,
+                         help="RefineMesh --decimate(0~1, 기본 1=단순화 끔·해상도 보존). "
+                              "`--refine` 켰을 때만 적용.")
+    parser.add_argument("--refine-regularity-weight", type=float, default=None,
+                         help="RefineMesh --regularity-weight(생략 시 OpenMVS 기본값 0.2). "
+                              "`--refine` 켰을 때만 적용.")
+    parser.add_argument(
+        "--no-smooth-high-curvature", dest="smooth_high_curvature", action="store_false",
+        help="고곡률 국소 스무딩(smooth_high_curvature_regions)을 끈다. 기본 켜짐 — "
+             "관측 부족 크레이터 완화 효과 실측 확인, 발가락 사이 등 디테일도 함께 "
+             "뭉개지는 트레이드오프는 감수하기로 결정됨.",
+    )
     args = parser.parse_args(argv)
 
     result = run_pipeline(
@@ -141,9 +168,14 @@ def main(argv: list[str] | None = None) -> int:
         postprocess_dmaps=args.postprocess_dmaps,
         dense_max_threads=args.dense_max_threads,
         visibility_filter_threshold=args.visibility_filter_threshold,
+        grazing_filter_min_score=args.grazing_filter_min_score,
+        reprojection_consistency_min_vote=args.reprojection_consistency_min_vote,
         free_space_support=args.free_space_support,
         thickness_factor=args.thickness_factor,
         quality_factor=args.quality_factor,
+        refine_decimate=args.refine_decimate,
+        refine_regularity_weight=args.refine_regularity_weight,
+        smooth_high_curvature=args.smooth_high_curvature,
     )
 
     print("\n[파이프라인 요약]")
