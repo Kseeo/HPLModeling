@@ -1,10 +1,27 @@
-"""사진/영상 한 벌 -> 변형된 발 메쉬. 앞선 다섯 모듈을 한 번에 엮는 오케스트레이션.
+"""사진/영상 한 벌 -> dense MVS 발 메쉬. 앞선 모듈들을 한 번에 엮는 오케스트레이션.
 
     frame_quality.assess_frames()   — SfM 전 프레임별 절대기준 QC
         └─ reconstruction.run_sparse_sfm()
               └─ masking.generate_masks()  — 여기서 발 미검출 프레임을 추가로 제외
-                    └─ cleaning.clean_point_cloud()
-                          └─ fitting.fit_point_cloud_to_template()
+                    └─ cleaning.clean_point_cloud()  — QA용 sparse 정리(최종 메쉬엔 안 씀)
+                    └─ masking.generate_masks(dilate=0)  — dense 전용 마스크
+                          └─ dense.run_dense_pipeline()  — OpenMVS densify + 메싱 + 파편 제거
+                                └─ (선택) 스케일 보정 — fitting.measured_length() 기준
+
+2026-08-10 결정: 예전엔 여기서 `fitting.fit_point_cloud_to_template()`로
+`FootMeshDeformer` 템플릿을 계측치에 맞춰 워핑했지만, 다운스트림 GNN 예측이
+정점 대응(vertex correspondence)을 요구하지 않는다는 판단에 따라 dense MVS
+메쉬로 완전히 대체했다 — SSM/deformer 둘 다 템플릿 토폴로지가 필요해서
+겪었던 제약이 사라진다. `fitting.py`에서 유일하게 남겨 쓰는 건
+`measured_length()`(PCA 기반 길이 측정, 템플릿과 무관하게 독립적으로 동작)
+뿐이다 — SfM은 절대 축척이 없어서(카메라 파라미터 기준 임의 단위) 이거라도
+없으면 최종 메쉬가 mm 단위와 무관한 임의 크기로 나온다.
+
+알려진 한계(2026-08-10 test03 실측, `dense.py` docstring 10번 참고): 지금
+촬영 프로토콜(발을 얹어두고 주변을 도는 방식)로는 발바닥 접지면을 어떤
+카메라도 못 봐서, 최종 메쉬에 정상 스캔(`data/scans/`, 구멍 비율 5~9%) 대비
+훨씬 큰 구멍(30%대, 발바닥 전체 규모)이 남는다 — 촬영 프로토콜을 바꾸기
+전까지는 코드로 못 고치는 문제라 그대로 둔다.
 
 각 단계의 튜닝 근거/기본값은 해당 모듈 docstring 참고. 이 함수는 그것들을
 엮기만 하고 새 로직은 추가하지 않는다 — 단계별로 따로 돌리고 싶으면(중간
@@ -17,19 +34,21 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-import numpy as np
 import trimesh
 
-from ..deformer import FootMeshDeformer
 from ..exceptions import CaptureQualityError
-from ..schemas import FootMeasurements
-from . import cleaning, frame_quality, masking, reconstruction
-from .fitting import fit_point_cloud_to_template
+from . import cleaning, dense, frame_quality, masking, reconstruction
+from .fitting import measured_length
 
 #: SfM에 넘길 최소 프레임 수 — `reconstruction.extract_frames()`의 "최소 8장
 #: 권장" 가이드와 맞춘다. QC 게이트 통과 후 이보다 적게 남으면 비싼 SfM을
 #: 돌리기 전에 명확한 에러로 끊는다.
 MIN_CANDIDATE_FRAMES = 8
+
+#: 스케일 보정 기준 삼는 자기신고 발길이가 없을 때 쓰는 임시값(mm). 절대
+#: 축척이 아니라 형태 비교/시각화용 placeholder — `fitting.py`의 기존 관례를
+#: 그대로 따른다.
+DEFAULT_REFERENCE_LENGTH_MM = 250.0
 
 
 @dataclass(slots=True)
@@ -38,27 +57,30 @@ class PipelineResult:
 
     images_dir: Path
     masks_dir: Path
+    dense_masks_dir: Path
     sparse_points_path: Path
     cleaned_points_path: Path
     output_mesh_path: Path
-    measurements: FootMeasurements
     n_points_registered_images: int
     n_points_total_images: int
     n_points_raw: int
     n_points_cleaned: int
+    n_mesh_vertices: int
+    n_mesh_faces: int
+    scale_factor: float
+    reference_length_mm: float | None
     quality_stats: dict
     mask_stats: dict
+    dense_mask_stats: dict
 
 
 def run_pipeline(
     *,
     workdir: Path,
-    template_path: Path,
     out_mesh: Path,
     video: Path | None = None,
     images_dir: Path | None = None,
-    side: str | None = None,
-    template_side: str = "right",
+    reference_length_mm: float | None = None,
     interval: float = 0.5,
     start_time: float = 0.0,
     end_time: float | None = None,
@@ -74,17 +96,21 @@ def run_pipeline(
     skin_erode: int = 8,
     mask_dilate: int = 15,
     cluster: bool = True,
-    rng_seed: int = 0,
+    openmvs_bin: str | Path | None = None,
+    refine: bool = False,
+    postprocess_dmaps: int = dense.DEFAULT_POSTPROCESS_DMAPS,
+    dense_max_threads: int = dense.DEFAULT_MAX_THREADS,
 ) -> PipelineResult:
-    """영상/사진 -> 발/피부 마스크 -> sparse SfM -> 배경 제거 -> 템플릿 워프.
+    """영상/사진 -> 발/피부 마스크 -> sparse SfM -> dense MVS -> 스케일 보정 메쉬.
 
     Args:
-        workdir: 중간 산출물(프레임, 마스크, DB, sparse 복원, 점군)을 저장할 폴더.
-        template_path: 기준 발 템플릿 STL.
-        out_mesh: 최종 변형된 메쉬 저장 경로(.stl).
+        workdir: 중간 산출물(프레임, 마스크, DB, sparse/dense 복원)을 저장할 폴더.
+        out_mesh: 최종 dense 메쉬 저장 경로(.ply/.stl 등 trimesh가 지원하는 형식).
         video / images_dir: 둘 중 하나만 지정. `video`면 프레임을 먼저 추출한다.
-        side / template_side: 좌우(카이랄리티) — `fitting.fit_point_cloud_to_template()`
-            참고. 실제 발과 템플릿의 좌우를 알고 있다면 반드시 `side`를 넘길 것.
+        reference_length_mm: 자기신고 발길이(mm). 있으면 최종 메쉬를 이 길이에
+            맞춰 스케일링한다(SfM은 절대 축척이 없다). 없으면
+            `DEFAULT_REFERENCE_LENGTH_MM` placeholder로 스케일링하고 경고를
+            출력한다 — 진짜 mm 크기가 아니므로 실사용 전 반드시 확인할 것.
         mask_during_extraction: 특징점 추출 단계에서도 마스크를 적용할지.
             기본 False — 배경이 피사체와 함께 고정된 텍스처 있는 촬영에서는
             오히려 등록률을 깎는 게 실측으로 확인됐다(`reconstruction.
@@ -96,8 +122,12 @@ def run_pipeline(
             선명도 스케일을 실측 없이 임의로 정하지 않았다.
         min_frames: QC/마스킹 게이트를 통과해야 하는 최소 프레임 수. 이보다
             적게 남으면 SfM을 돌리지 않고 `CaptureQualityError`를 던진다.
-        cluster: 정리된 점군에 DBSCAN 군집화(가장 큰 덩어리만 유지)를 추가로
-            적용할지. 마스크 정리 이후 적용은 안전하다고 실측 확인됨(기본 True).
+        cluster: `cleaned_points.ply`(QA용 sparse 정리 산출물)에 DBSCAN
+            군집화를 추가로 적용할지. 최종 dense 메쉬에는 영향 없다 — dense
+            경로는 DBSCAN을 의도적으로 안 쓴다(`dense.py` docstring 3번 참고).
+        openmvs_bin / refine / postprocess_dmaps / dense_max_threads:
+            `dense.run_dense_pipeline()`으로 그대로 전달. 튜닝 근거는
+            `dense.py` 모듈 docstring 참고.
 
     Returns:
         산출물 경로와 요약 통계를 담은 `PipelineResult`.
@@ -180,36 +210,73 @@ def run_pipeline(
         f"3D점 {len(raw_points):,}개, 평균 재투영 오차 {recon.compute_mean_reprojection_error():.3f}px"
     )
 
+    # QA용 — 최종 dense 메쉬 생성에는 안 쓰인다(마스크 기반 배경 제거는
+    # dense.run_dense_pipeline() 내부에서 densify 이전에 따로 적용된다).
     cleaned_points = cleaning.clean_point_cloud(recon, masks_dir=masks_dir, cluster=cluster)
     cleaned_points_path = workdir / "cleaned_points.ply"
     cleaned_points_path.parent.mkdir(parents=True, exist_ok=True)
     trimesh.PointCloud(cleaned_points).export(cleaned_points_path)
 
-    engine = FootMeshDeformer(template_path)
-    deformed, measured = fit_point_cloud_to_template(
-        cleaned_points, engine, side=side, template_side=template_side, rng_seed=rng_seed,
+    # dense masking은 sparse용(mask_dilate, 기본 15)과 별도로 dilate=0이 필요하다
+    # (`dense.py` docstring 2번 참고 — 팽창 여유가 dense에서는 배경 누출로 직결).
+    dense_masks_dir = workdir / "masks_dense"
+    dense_mask_stats = masking.generate_masks(
+        resolved_images_dir, dense_masks_dir, names=candidate_names,
+        dilate=0, skin_refine=skin_refine, skin_erode=skin_erode,
     )
-    out_mesh.parent.mkdir(parents=True, exist_ok=True)
-    deformed.export(out_mesh)
 
-    report = engine.last_report
-    if report is not None:
-        print("\n" + "\n".join(report.summary_lines()))
-        for warning in report.warnings:
-            print(f"[warn] {warning}")
-    print(f"\n저장: {out_mesh}")
+    sparse_dir = dense.largest_sparse_dir(workdir / "sparse")
+    dense_workdir = workdir / "dense_mvs"
+    mesh_ply = dense.run_dense_pipeline(
+        sparse_dir=sparse_dir, images_dir=resolved_images_dir, masks_dir=dense_masks_dir,
+        workdir=dense_workdir, openmvs_bin=openmvs_bin, refine=refine,
+        postprocess_dmaps=postprocess_dmaps, max_threads=dense_max_threads,
+    )
+
+    # 부유 파편 제거(keep_largest_component)는 dense.run_dense_pipeline() 안에서
+    # 이미 적용되어 mesh_ply에 반영돼 있다 — 여기서 다시 호출하면 이미 단일
+    # 덩어리인 메쉬에 대한 무의미한 재호출이 된다.
+    mesh = trimesh.load(mesh_ply, process=False)
+
+    # PCA 주축 정렬(X=최장축) — 템플릿이 없어져 위/아래·앞/뒤(부호)는 못 정하고
+    # 축만 맞춘다(`dense.align_principal_axes()` docstring 참고).
+    mesh = dense.align_principal_axes(mesh)
+
+    resolved_reference_length_mm = reference_length_mm
+    if resolved_reference_length_mm is None:
+        resolved_reference_length_mm = DEFAULT_REFERENCE_LENGTH_MM
+        print(
+            f"[스케일] 자기신고 발길이 없음 — placeholder {DEFAULT_REFERENCE_LENGTH_MM:.0f}mm 기준으로"
+            " 스케일링(절대 축척 아님, 형태 비교/시각화용 임시값 — 실사용 전 반드시 확인할 것)"
+        )
+    own_length = measured_length(mesh.vertices)
+    scale_factor = resolved_reference_length_mm / own_length
+    mesh.apply_scale(scale_factor)
+    print(
+        f"[스케일] 메쉬 자체 PCA 길이 {own_length:.4f}(SfM 임의 단위) -> "
+        f"{resolved_reference_length_mm:.1f}mm 기준(x{scale_factor:.4f})"
+    )
+
+    out_mesh.parent.mkdir(parents=True, exist_ok=True)
+    mesh.export(out_mesh)
+    print(f"\n저장: {out_mesh} (정점 {len(mesh.vertices):,}개, 면 {len(mesh.faces):,}개)")
 
     return PipelineResult(
         images_dir=resolved_images_dir,
         masks_dir=masks_dir,
+        dense_masks_dir=dense_masks_dir,
         sparse_points_path=sparse_points_path,
         cleaned_points_path=cleaned_points_path,
         output_mesh_path=out_mesh,
-        measurements=measured,
         n_points_registered_images=recon.num_reg_images(),
         n_points_total_images=len(candidate_names),
         n_points_raw=len(raw_points),
         n_points_cleaned=len(cleaned_points),
+        n_mesh_vertices=len(mesh.vertices),
+        n_mesh_faces=len(mesh.faces),
+        scale_factor=scale_factor,
+        reference_length_mm=reference_length_mm,
         quality_stats=quality_stats,
         mask_stats=mask_stats,
+        dense_mask_stats=dense_mask_stats,
     )

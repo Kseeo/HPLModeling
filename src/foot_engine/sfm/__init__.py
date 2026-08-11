@@ -33,8 +33,10 @@ from .cleaning import (
     plane_removal_keep_mask,
 )
 from .dense import (
+    align_principal_axes,
     clean_dense_point_cloud,
     convert_masks_for_openmvs,
+    keep_largest_component,
     largest_sparse_dir,
     run_dense_pipeline,
     run_densify_point_cloud,
@@ -113,5 +115,7 @@ __all__ = [
     "clean_dense_point_cloud",
     "run_reconstruct_mesh",
     "run_refine_mesh",
+    "keep_largest_component",
+    "align_principal_axes",
     "run_dense_pipeline",
 ]

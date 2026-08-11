@@ -11,52 +11,18 @@
         └─ convert_masks_for_openmvs()  -- masking.py 마스크를 OpenMVS 명명 규칙으로
               └─ run_interface_colmap()     -- COLMAP 형식 -> OpenMVS 씬(.mvs)
                     └─ run_densify_point_cloud()  -- 마스크 기반 dense 포인트클라우드
-                          └─ clean_dense_point_cloud()  -- 통계적 이상치 제거만
+                          └─ clean_dense_point_cloud()  -- 통계적 이상치 제거(뿔/스파이크 제거는 기본 꺼짐, 11번 참고)
                                 └─ run_reconstruct_mesh()   -- Delaunay+그래프컷 메싱
                                       └─ run_refine_mesh()      -- (선택) 사진 광도일관성 보정
+                                            └─ keep_largest_component()  -- 부유 파편 제거
 
-OpenMVS는 pip 패키지가 아니라 **별도 설치한 CLI 실행파일**이 필요하다
+OpenMVS는 pip 패키지가 아니라 별도 설치한 CLI 실행파일이 필요하다
 (`InterfaceCOLMAP`/`DensifyPointCloud`/`ReconstructMesh`/`RefineMesh`,
 CPU 빌드로 충분 -- 실측 확인, CUDA 불필요). 설치 경로는 `OPENMVS_BIN_DIR`
 환경변수로 지정하거나 `openmvs_bin` 인자로 직접 넘긴다. 설치 방법은
 README 참고.
 
-실측으로 확인된, 코드에 그대로 반영된 결론들
---------------------------------------------
-1. **마스크는 densify 이전에 적용해야 한다** (`DensifyPointCloud
-   --mask-path`) -- 사후에 sparse 점 정리하듯 numpy 배열만 필터링하면 dense
-   경로와 완전히 단절된다(실측: 배경 섞인 원본 그대로 densify됨).
-2. **마스크 팽창(dilate)은 0으로** -- `masking.generate_masks()`의 기본
-   dilate=15는 sparse 등록/랜드마크 추출용으로 안전 여유를 준 것이지,
-   dense masking에는 그 여유가 배경 누출로 직결된다(실측: dilate=15 대비
-   dilate=0이 인접 배경 잔여물을 뚜렷이 줄임).
-3. **DBSCAN 최대 군집 유지 방식은 쓰지 말 것** -- 발바닥처럼 촬영 각도상
-   원래 점이 성긴 진짜 부위를, 배경처럼 동떨어진 노이즈로 오판해 통째로
-   삭제하는 버그가 실측으로 확인됐다(발바닥 노멀 방향 점 60,937개 -> 0개).
-   통계적 이상치 제거(`filter_outlier_points`)만 쓴다 -- 배경 경계의
-   잔여 노이즈는 남지만, 발 형상 자체를 깎아내는 것보다 안전한 실패 방향이다.
-4. **마스크 기반 재투영 분류도 경계 노이즈엔 무력** -- 남은 노이즈를 각
-   점이 관측된 모든 카메라에 재투영해 마스크와 대조해봐도(만장일치
-   기준에서도) 93.8%가 마스크 안쪽으로 판정된다 -- 이건 배경이 아니라
-   발 실루엣 경계 자체의 MVS 깊이 노이즈라 마스크로 원리적으로 못 거른다.
-5. **`ReconstructMesh --smooth 0`** -- 기본 스무딩(2회)이 형상 정교함을
-   깎아낸다는 사용자 육안 확인(raw 메쉬가 스무딩된 버전보다 발 형태에
-   더 정확히 맞았음).
-6. **`--postprocess-dmaps 3`**(remove-speckles + fill-gaps)로 저텍스처
-   평면(발등/발바닥 등)의 깊이 추정 공백을 일부 메울 수 있다(실측:
-   정점 13.8% 증가) -- 다만 완전한 해결책은 아니다.
-7. **`RefineMesh`가 압도적 병목이다**(전체 소요시간의 70~72%, 실측
-   1.5~9분) -- 사진 광도일관성 기반 보정이라 노이즈/뿔 감소에 실제
-   효과가 있지만(실측 확인), 빠른 반복 실험 시엔 건너뛸 만하다.
-   `--cuda-device` 기본값이 -2(CPU)라 CUDA 없이도 동작한다.
-8. **OpenMVS 크래시**(ACCESS_VIOLATION/힙손상, 원인 불명 -- 아마 멀티스레드
-   경쟁 상태)가 이 저장소 검증 중 두 차례 발생했다 -- `--max-threads`를
-   낮추면(예: 8) 재현 안 됨. `run_densify_point_cloud()` 기본값에 반영.
-9. **sparse 재구성 폴더 번호는 크기순이 아니다** -- `run_sparse_sfm()`이
-   반환하는 `pycolmap.Reconstruction`을 직접 쓰면 되지만, 이미 디스크에
-   저장된 `sparse/0`, `sparse/1`, ... 중 어느 게 가장 큰(등록 이미지 많은)
-   것인지는 매번 직접 비교해야 한다(`largest_sparse_dir()` 참고) --
-   `sparse/0`을 무조건 가정했다가 2장짜리 파편을 densify한 실패 사례 있음.
+
 """
 
 from __future__ import annotations
@@ -66,9 +32,13 @@ import struct
 import subprocess
 from pathlib import Path
 
+import networkx as nx
 import numpy as np
 import pycolmap
+import trimesh
+from scipy.spatial import cKDTree
 
+from ..ssm import pca_axes
 from .reconstruction import filter_outlier_points
 
 #: OpenMVS CLI 실행파일이 있는 폴더. 환경변수로 덮어쓸 것 -- 설치 방법은 README 참고.
@@ -225,8 +195,9 @@ def clean_dense_point_cloud(
     *,
     k: int = 8,
     std_ratio: float = 2.0,
+    prune_protrusions: bool = False,
 ) -> tuple[int, int]:
-    """dense 포인트클라우드에서 통계적 이상치만 제거한다 (DBSCAN 사용 안 함).
+    """dense 포인트클라우드에서 통계적 이상치를 제거한다 (DBSCAN 사용 안 함).
 
     OpenMVS의 dense PLY는 표준 필드(xyz/rgb/normal) 외에 커스텀 리스트
     속성(`view_indices`/`view_weights` -- 각 점을 관측한 카메라 가시성
@@ -235,8 +206,10 @@ def clean_dense_point_cloud(
     조용히 무시함) -- 그 상태로 `ReconstructMesh -p`에 넘기면 크래시한다
     (실측 확인: ACCESS_VIOLATION). 그래서 원본 바이트를 그대로 보존한 채
     살아남는 점의 레코드만 골라 이어붙이는 방식으로 직접 파싱/저장한다.
-
-    DBSCAN(최대 군집 유지)은 의도적으로 안 쓴다 -- 모듈 docstring 3번 참고.
+    DBSCAN(최대 군집 유지)은 의도적으로 안 쓴다 -- 모듈 docstring 3번 참고
+    Args:
+        prune_protrusions: 위 경고 참고. 켜려면 `density_ratio`/`far_percentile`을
+            대상 점군 규모에서 직접 검증한 뒤 켤 것 -- 기본은 꺼짐.
 
     Returns:
         (원본 점 개수, 정리 후 점 개수).
@@ -270,9 +243,23 @@ def clean_dense_point_cloud(
         )
 
     inliers = filter_outlier_points(xyz, k=k, std_ratio=std_ratio)
-    kept_n = int(inliers.sum())
-    print(f"[dense] 점단위 정리(통계적 이상치 제거만): {n:,} -> {kept_n:,} ({kept_n/n:.1%} 유지)")
+    stat_kept_n = int(inliers.sum())
+    print(f"[dense] 점단위 정리(통계적 이상치 제거): {n:,} -> {stat_kept_n:,} ({stat_kept_n/n:.1%} 유지)")
 
+    if prune_protrusions:
+        # 통계적 이상치 제거로 남은 점들 기준으로 뿔/스파이크 판정(전체 배경
+        # 노이즈가 섞인 상태에서 밀도를 재면 뿔 판정 기준 자체가 흔들린다).
+        protrusion_mask_subset = _protrusion_remove_mask(
+            xyz[inliers], adjacency_edges=None,
+            density_radius_nn_mult=4.0, far_percentile=97.0, density_ratio=0.6,
+        )
+        n_protrusion = int(protrusion_mask_subset.sum())
+        if n_protrusion:
+            inlier_idx = np.where(inliers)[0]
+            inliers[inlier_idx[protrusion_mask_subset]] = False
+            print(f"[dense] 뿔/스파이크 제거: 점 {n_protrusion:,}개")
+
+    kept_n = int(inliers.sum())
     chunks = [body[offsets[i]:offsets[i + 1]] for i in np.where(inliers)[0]]
     new_body = b"".join(chunks)
     new_header = header.replace(f"element vertex {n}\n", f"element vertex {kept_n}\n")
@@ -329,6 +316,151 @@ def run_refine_mesh(
     return workdir / output_name.replace(".mvs", ".ply")
 
 
+def _protrusion_remove_mask(
+    points: np.ndarray,
+    *,
+    density_radius_nn_mult: float,
+    far_percentile: float,
+    density_ratio: float,
+    adjacency_edges: np.ndarray | None = None,
+) -> np.ndarray:
+    """뿔/스파이크에 해당하는 점(정점) 인덱스 마스크를 계산한다 -- 메쉬 정점과
+    raw 포인트클라우드 양쪽에서 재사용하는 공통 로직.
+
+    `adjacency_edges`를 주면(메쉬) 그 인접성을 그대로 쓰고, `None`이면(raw
+    포인트클라우드, 메쉬 엣지가 없음) "얇음" 후보 점들끼리 반경 기반으로
+    인접 그래프를 새로 구성한다.
+    """
+    n = len(points)
+    if n < 20:
+        return np.zeros(n, dtype=bool)
+
+    tree = cKDTree(points)
+    nn_dist, _ = tree.query(points, k=min(11, n))
+    typical_spacing = float(np.median(nn_dist[:, 1:]))
+    if typical_spacing <= 0:
+        return np.zeros(n, dtype=bool)
+
+    centroid = np.median(points, axis=0)
+    dist = np.linalg.norm(points - centroid, axis=1)
+    density = tree.query_ball_point(points, typical_spacing * density_radius_nn_mult, return_length=True)
+    thin_mask = density < np.median(density) * density_ratio
+    far_mask = dist > np.percentile(dist, far_percentile)
+
+    graph = nx.Graph()
+    thin_idx_arr = np.where(thin_mask)[0]
+    if adjacency_edges is not None:
+        graph.add_edges_from(adjacency_edges)
+    else:
+        graph.add_nodes_from(thin_idx_arr.tolist())
+        if len(thin_idx_arr) >= 2:
+            thin_tree = cKDTree(points[thin_idx_arr])
+            local_pairs = thin_tree.query_pairs(typical_spacing * 2.0)
+            graph.add_edges_from((thin_idx_arr[a], thin_idx_arr[b]) for a, b in local_pairs)
+
+    thin_idx = set(thin_idx_arr.tolist())
+    far_idx = set(np.where(far_mask)[0].tolist())
+    remove_idx: set[int] = set()
+    for component in nx.connected_components(graph.subgraph(thin_idx & set(graph.nodes))):
+        if component & far_idx:
+            remove_idx |= component
+
+    remove_mask = np.zeros(n, dtype=bool)
+    if remove_idx:
+        remove_mask[list(remove_idx)] = True
+    return remove_mask
+
+
+def prune_thin_protrusions(
+    mesh: trimesh.Trimesh,
+    *,
+    density_radius_nn_mult: float = 4.0,
+    far_percentile: float = 97.0,
+    density_ratio: float = 0.6,
+) -> tuple[trimesh.Trimesh, int]:
+    """몸통에 이어져(fused) 붙은 뿔/스파이크를 통째로 잘라낸다(모듈 docstring 11번).
+
+    `keep_largest_component()`는 이미 분리된 파편만 잡는다 -- 뿔은 몸통과
+    같은 연결 요소라 무력하다. 거리 percentile 컷만으로는 뿔의 끝부분만
+    잘리고 몸통에 이어진 뿌리는 남는다(실측 확인). 대신 "뿔은 국소 정점
+    밀도가 몸통보다 뚜렷이 낮다"는 걸 핵심 단서로 쓴다 -- 얇고 길쭉한
+    구조라 단위 부피당 정점 수가 적다:
+
+        1. 각 정점의 반경 `density_radius_nn_mult * 전형적 10-최근접 간격`
+           안 이웃 수(밀도) 계산 -- PCA 기반 `measured_length()`나 중심
+           거리 같은 "물리적 크기" 척도는 안 쓴다. 전자는 뿔 자체가 축을
+           왜곡시키는 순환 참조 문제가 있고(모듈 docstring 11번), 후자는
+           실측해보니 점 밀도 분포(중심 근처에 몰림)에 좌우돼 반경이
+           지나치게 작아지는 문제가 있었다(실측: median 정점간 거리
+           기준으로 반경을 잡으니 밀도 median이 1.0으로 무너짐) --
+           메쉬 해상도(정점 간격)에 비례하는 반경이라야 정점 수/전체
+           크기가 달라져도 "밀도" 수치가 일관된 의미를 가진다.
+        2. 밀도가 전체 중앙값의 `density_ratio` 미만인 정점을 "얇음"으로 표시.
+        3. 중심에서 먼 상위 `far_percentile`% 정점을 뿔 후보 씨앗으로 표시.
+        4. "얇음" 정점들만으로 메쉬 인접 그래프의 연결 요소를 구하고, 씨앗과
+           겹치는 연결 요소(뿔의 끝~뿌리 전체)를 통째로 제거한다.
+
+    Returns:
+        (프루닝된 메쉬, 제거된 정점 수).
+    """
+    remove_mask = _protrusion_remove_mask(
+        mesh.vertices, adjacency_edges=mesh.edges_unique,
+        density_radius_nn_mult=density_radius_nn_mult, far_percentile=far_percentile,
+        density_ratio=density_ratio,
+    )
+    n_removed = int(remove_mask.sum())
+    if n_removed == 0:
+        return mesh, 0
+
+    pruned = mesh.copy()
+    pruned.update_vertices(~remove_mask)
+    return pruned, n_removed
+
+
+def keep_largest_component(mesh: trimesh.Trimesh) -> tuple[trimesh.Trimesh, int, int]:
+    """면(face) 기준 가장 큰 연결 요소만 남기고 부유 파편을 지운다.
+
+    `ReconstructMesh` 출력은 보통 발 하나가 98%+를 차지하는 단일 덩어리이고,
+    나머지는 배경에서 떨어져 나온 작은 파편이다(모듈 docstring 10번 참고).
+    이미 공간적으로 분리된 덩어리 단위로만 자르므로, 3번 항목의 DBSCAN
+    버그(성긴 진짜 부위를 노이즈로 오판)와 달리 안전하다 -- 다만 발 표면에
+    이어져(fused) 붙은 경계 노이즈는 같은 덩어리라 이걸로 안 떨어진다.
+
+    Returns:
+        (필터링된 메쉬, 원본 face 수, 남은 face 수).
+    """
+    total_faces = len(mesh.faces)
+    components = mesh.split(only_watertight=False)
+    if len(components) <= 1:
+        return mesh, total_faces, total_faces
+    largest = max(components, key=lambda c: len(c.faces))
+    return largest, total_faces, len(largest.faces)
+
+
+def align_principal_axes(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
+    """PCA 주축을 좌표축(X=최장, Y=중간, Z=최단)에 맞춰 정렬한다(중심은 원점).
+
+    `fitting.fit_point_cloud_to_template()`가 하던 "템플릿 좌표계에 강체
+    정렬"을 대체하는 최소 버전이다 -- 템플릿이 없어졌으니 맞출 대상이 없고,
+    발 하나만 놓고는 축의 부호(양/음, 즉 어느 쪽이 발끝/뒤꿈치·위/아래인지)를
+    결정할 근거가 없다. 특히 위/아래(발바닥 방향)는 지금 마스킹으로 발바닥이
+    잘 안 찍혀서(모듈 상단 "알려진 한계" 참고) 법선 기반 평면 판정이
+    신뢰할 수 없어 시도하지 않았다 -- 축만 좌표계에 맞추고 방향(어느 쪽이
+    위/앞인지)은 실행마다 달라질 수 있다는 걸 감안할 것.
+
+    반사(reflection)가 섞이면 메쉬가 뒤집혀(면 방향이 반전돼) 나오므로,
+    행렬식이 -1이면 마지막 축 부호를 뒤집어 순수 회전(det=+1)만 적용한다.
+    """
+    axes = pca_axes(mesh.vertices)
+    if np.linalg.det(axes) < 0:
+        axes = axes.copy()
+        axes[:, -1] *= -1.0
+    centroid = mesh.vertices.mean(axis=0)
+    aligned = mesh.copy()
+    aligned.vertices = (mesh.vertices - centroid) @ axes
+    return aligned
+
+
 def run_dense_pipeline(
     *,
     sparse_dir: Path,
@@ -377,6 +509,16 @@ def run_dense_pipeline(
 
     if refine:
         mesh_ply = run_refine_mesh(scene_mvs, mesh_ply, openmvs_dir, openmvs_bin=openmvs_bin)
+
+    # 뿔/스파이크는 이미 `clean_dense_point_cloud()`에서 메싱 *이전*에 점
+    # 단위로 제거됐다(모듈 docstring 11번) -- 메쉬가 만들어진 뒤 사후
+    # 수술하면 절단면 위상이 지저분해지는 게 실측 확인돼 그 방식은 버렸다.
+    # 여기서는 이미 분리된 부유 파편만 추가로 정리한다.
+    mesh = trimesh.load(mesh_ply, process=False)
+    mesh, faces_before, faces_after = keep_largest_component(mesh)
+    if faces_after < faces_before:
+        print(f"[dense] 부유 파편 제거: {faces_before:,} -> {faces_after:,} faces")
+        mesh.export(mesh_ply)
 
     print(f"[dense] 완료: {mesh_ply}")
     return mesh_ply
