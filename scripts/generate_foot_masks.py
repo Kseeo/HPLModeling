@@ -84,10 +84,13 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     print(f"[완료] {stats['total']}장 처리, 마스크 저장: {args.out}")
-    if stats["fallback"]:
-        print(f"[안내] {stats['fallback']}장은 세그멘테이션 커버리지가 낮아 원본 전체를 사용했습니다.")
     if stats["rejected"]:
-        print(f"[안내] {stats['rejected']}장은 발이 검출되지 않아 후보에서 제외했습니다: {stats['rejected_names']}")
+        r = stats["rejected_reasons"]
+        print(
+            f"[안내] {stats['rejected']}장을 후보에서 제외했습니다 "
+            f"(발 미검출 {r['no_foot']}, 세그멘테이션 애매 {r['low_coverage']}, "
+            f"피부 정제 붕괴 {r['skin_refine_collapsed']}): {stats['rejected_names']}"
+        )
     if args.skin_refine:
         print(f"[안내] {stats['refined']}장은 피부 정제(옷/장신구 제외)가 적용되었습니다.")
     return 0

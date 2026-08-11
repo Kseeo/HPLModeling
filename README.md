@@ -234,6 +234,34 @@ python scripts/inspect_frame_quality.py data/output/sfm_prototype/test00_run/ima
       깊이 추정 노이즈라 마스크 정확도를 아무리 올려도 원리적으로
       못 거른다. `RefineMesh`(사진 광도일관성 보정)가 어느 정도 줄여주는
       게 실측 확인됐지만 완전히 없애지는 못한다.
+      "합의를 더 엄격히 요구"하는 계열 파라미터(`--number-views-fuse`,
+      fusion 임계값)로 걸러보려는 시도는 **역효과임을 실측 확인**(발바닥
+      촬영 각도상 원래 관측 뷰가 적어, 합의 기준을 올리면 경계보다 발바닥이
+      먼저 죽는다 — 경계 94.9~98.7% 유지 vs 발바닥 32~53% 유지). 대신
+      `filter_point_cloud_visibility()`(OpenMVS 내장 가시성 필터,
+      `run_dense_pipeline(visibility_filter_threshold=-1)`로 켤 수 있음)는
+      2026-08-11에 크래시 원인(필터 출력 PLY가 그래프컷에 필요한
+      view_indices/view_weights 필드를 통째로 빠뜨림)을 찾아
+      `restore_point_cloud_views()`로 고쳤다 — test03 기준 발바닥 100%
+      보존, 경계 근방 94.7% vs 내부 97.6% 유지로 방향은 맞지만 효과는
+      작음(근본 해결책 아님). 같은 세션에 `filter_grazing_points()`
+      (법선-시선 grazing-angle 필터, `grazing_filter_min_score=0.3`로 켤 수
+      있음)도 새로 추가했다 — 발바닥 100% 보존은 확인됐지만 경계 노이즈
+      제거 효과 자체는 아직 육안 검증 전이다(자동 측정용 boundary proxy가
+      발가락 끝 같은 진짜 표면을 "경계"로 오분류해 신뢰도가 낮다는 게
+      드러났다). 상세: `data/output/dense_mvs_results/README.md`.
+    - **배경 오염(2D 마스크 오분류)은 해결됨.** 위 경계 노이즈와 별개 문제로,
+      일부 프레임의 마스크가 배경 물체(예: 의자)를 사람/피부로 오분류해
+      생기는 오염은 점 하나를 씬의 카메라 전부에 재투영해 마스크 다수결로
+      판정하는 `filter_by_reprojection_consistency()`로 해결됐다(육안 확인
+      완료, 발바닥 편애 없이 균일하게 걸러짐). `reprojection_consistency_min_vote=0.6`
+      로 켤 수 있다(기본 꺼짐 — test03 1건만 검증).
+    - **오목 부위(아치/뒤꿈치) 크레이터는 후처리로 원리적 해결 불가.**
+      관측 부족으로 생기는 저주파 왜곡이라 노이즈와 구분이 안 된다(quadric
+      피팅으로도 실측 확인). `smooth_high_curvature_regions()`(기본 켜짐)로
+      완화만 가능 — 발가락 사이 등 진짜 디테일도 함께 뭉개지는 트레이드오프
+      감수. 근본 해결은 촬영 단계에서 오목 부위를 가까이/여러 각도로
+      보완 촬영하는 것뿐. 상세: `data/output/dense_mvs_results/README.md`.
     - **저텍스처 평면(발등/발바닥)에서 깊이 추정 자체가 비어 채워지지
       않는 경우가 있다.** `DensifyPointCloud --postprocess-dmaps 3`
       (remove-speckles+fill-gaps)로 일부 완화되나(실측: 정점 13.8%↑)

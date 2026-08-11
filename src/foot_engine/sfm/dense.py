@@ -7,20 +7,49 @@ CPU 빌드로 동작합니다.
 
 파이프라인 흐름:
     undistort_for_dense() -> convert_masks_for_openmvs() -> run_interface_colmap()
-    -> run_densify_point_cloud() -> clean_dense_point_cloud() -> run_reconstruct_mesh()
-    -> run_refine_mesh() (선택) -> keep_largest_component()
+    -> run_densify_point_cloud() -> clean_dense_point_cloud()
+    -> (선택) filter_by_reprojection_consistency() -> (선택) filter_grazing_points()
+    -> (선택) filter_point_cloud_visibility() -> restore_point_cloud_views()
+    -> run_reconstruct_mesh() -> run_refine_mesh() (선택) -> keep_largest_component()
+    -> smooth_high_curvature_regions() (기본 켜짐)
 
 주요 실측 결과 및 구현 규칙:
 1. 마스크 처리: 배경 누출 방지를 위해 densify 이전에 마스크를 적용하며, dilate=0으로 설정합니다.
 2. 노이즈 제거: DBSCAN은 발바닥 등 성긴 진짜 점을 삭제하므로 통계적 이상치 제거만 사용합니다.
-   (가시성 필터/재투영 분류는 크래시 및 노이즈 필터링 한계로 사용하지 않음)
+   실루엣 경계 노이즈를 겨냥한 "합의를 더 엄격히 요구" 계열 파라미터
+   (`--number-views-fuse`, fusion 임계값들)도 같은 이유로 부적합함을 실측
+   확인(2026-08-11, test03) — 경계는 94.9~98.7% 그대로 남는데 발바닥은
+   32~53%만 남아 오히려 역효과. 상세: `data/output/dense_mvs_results/README.md`.
 3. 메쉬 생성: 형태 보존을 위해 스무딩을 OFF(`--smooth 0`)하며, 크래시 방지를 위해 멀티스레드 수를 제한합니다.
    생성 후 부유 파편은 최대 연결 요소만 남겨 제거합니다.
 4. 축 정렬: PCA 분산 순위 대신 상/하 평탄도 비대칭성을 측정하여 발바닥(-Y) 방향을 정렬합니다.
+5. 가시성 필터(`filter_point_cloud_visibility()`)는 기본 꺼짐이지만 이제 안전하게
+   쓸 수 있습니다 — OpenMVS 자신의 필터 내보내기가 view 필드를 지워
+   `ReconstructMesh`를 크래시시키던 문제를 `restore_point_cloud_views()`로
+   고쳤습니다(2026-08-11 test03 실측: threshold=-1 기준 발바닥 100% 보존,
+   경계 근방 94.7% vs 내부 97.6% 유지 — 효과는 작지만 sole 손상 없이 방향은
+   맞음). `run_dense_pipeline(visibility_filter_threshold=...)`로 켤 것.
+6. 배경 오염(2D 마스크 오분류, 예: 의자를 사람으로 오분류)은 특정 프레임
+   하나가 아니라 씬의 카메라 전부에 재투영해 마스크 다수결로 판정하는
+   `filter_by_reprojection_consistency()`로 해결됩니다(2026-08-11 test03
+   실측: 육안으로 배경 제거 확인, 발바닥 편애 없이 균일하게 79% 유지).
+   `reprojection_consistency_min_vote=0.6`로 켤 것(기본 꺼짐).
+7. `RefineMesh`의 `decimate` 기본값을 1(단순화 끔)로 바꿨습니다 — OpenMVS
+   자체 기본값(0=auto)은 해상도를 크게 깎아 뭉툭해집니다. 대신 관측 부족
+   부위에 남는 크레이터형 결함은 `smooth_high_curvature_regions()`(기본
+   켜짐)로 완화합니다 — 노이즈와 진짜 굴곡을 주파수로만 구분해 발가락
+   사이 등 디테일도 함께 뭉개지는 트레이드오프가 있습니다(원리적 한계,
+   국소 이차곡면 피팅으로도 안 풀림 — 상세 `dense_mvs_results/README.md`).
 
 알려진 한계:
 - 발바닥 미촬영 프로토콜 특성상 접지면에 큰 구멍(30%대)이 남습니다.
 - 발목 부근의 뿔/스파이크 형태 돌출부 결함은 완전히 제거되지 않고 유지됩니다.
+- 실루엣 경계의 MVS 깊이 노이즈(flying pixel)는 위 5번으로 일부만 완화되며
+  근본 해결책은 아닙니다 — occlusion 경계에서 여러 뷰가 체계적으로 같은
+  값에 "합의"하는 편향이라 다수결/합의 강도 기반 필터로는 원리적 한계가 있음.
+- 오목 부위(아치/뒤꿈치 굴곡) 크레이터는 관측 부족으로 생기는 저주파
+  왜곡이라 후처리로 원리적 해결이 불가능합니다 — 촬영 단계에서 보완 촬영
+  필요(위 7번 참고).
 """
 
 from __future__ import annotations
@@ -30,6 +59,7 @@ import struct
 import subprocess
 from pathlib import Path
 
+import cv2
 import networkx as nx
 import numpy as np
 import pycolmap
@@ -187,40 +217,21 @@ def run_densify_point_cloud(
     return workdir / output_name.replace(".mvs", ".ply")
 
 
-def clean_dense_point_cloud(
-    dense_ply_path: Path,
-    out_path: Path,
-    *,
-    k: int = 8,
-    std_ratio: float = 2.0,
-    prune_protrusions: bool = False,
-) -> tuple[int, int]:
-    """dense 포인트클라우드에서 통계적 이상치를 제거한다 (DBSCAN 사용 안 함).
-
-    OpenMVS의 dense PLY는 표준 필드(xyz/rgb/normal) 외에 커스텀 리스트
-    속성(`view_indices`/`view_weights` -- 각 점을 관측한 카메라 가시성
-    정보로, 이후 `ReconstructMesh`의 그래프컷 가중치 계산에 쓰인다)을 갖고
-    있어 `trimesh`/`open3d`로 읽고 다시 쓰면 그 정보가 소실된다(둘 다
-    조용히 무시함) -- 그 상태로 `ReconstructMesh -p`에 넘기면 크래시한다
-    (실측 확인: ACCESS_VIOLATION). 그래서 원본 바이트를 그대로 보존한 채
-    살아남는 점의 레코드만 골라 이어붙이는 방식으로 직접 파싱/저장한다.
-    DBSCAN(최대 군집 유지)은 의도적으로 안 쓴다 -- 모듈 docstring 3번 참고
-    Args:
-        prune_protrusions: 위 경고 참고. 켜려면 `density_ratio`/`far_percentile`을
-            대상 점군 규모에서 직접 검증한 뒤 켤 것 -- 기본은 꺼짐.
+def _parse_dense_ply(ply_path: Path) -> tuple[str, bytes, np.ndarray, np.ndarray]:
+    """OpenMVS dense PLY(xyz+rgb+normal+view_indices+view_weights)를 레코드
+    단위로 파싱한다. 고정 필드 27바이트 뒤로 가변 길이 리스트(view_indices,
+    view_weights)가 이어지는 스키마 — `trimesh`/`open3d` 라운드트립은 이
+    필드를 날려버려서 원본 바이트를 직접 다룬다.
 
     Returns:
-        (원본 점 개수, 정리 후 점 개수).
+        (header 텍스트, body 바이트열, 레코드 경계 offset 배열(N+1,), xyz 배열(N,3)).
     """
-    data = dense_ply_path.read_bytes()
+    data = ply_path.read_bytes()
     header_end = data.index(b"end_header\n") + len(b"end_header\n")
     header = data[:header_end].decode("ascii")
     body = data[header_end:]
     n = int([line for line in header.splitlines() if line.startswith("element vertex")][0].split()[-1])
 
-    # 고정 필드 27바이트: x,y,z(f4)*3 + red,green,blue(u1)*3 + nx,ny,nz(f4)*3.
-    # 그 뒤로 가변 길이 리스트 두 개(view_indices: u1 count + u4*count,
-    # view_weights: u1 count + f4*count)가 이어진다 -- OpenMVS dense PLY 고정 스키마.
     fixed_size = 27
     offsets = np.empty(n + 1, dtype=np.int64)
     xyz = np.empty((n, 3), dtype=np.float32)
@@ -236,9 +247,183 @@ def clean_dense_point_cloud(
     offsets[n] = pos
     if pos != len(body):
         raise ValueError(
-            f"{dense_ply_path} 파싱 실패 -- 예상 스키마(xyz+rgb+normal+view_indices"
+            f"{ply_path} 파싱 실패 -- 예상 스키마(xyz+rgb+normal+view_indices"
             "+view_weights)와 다른 형식일 수 있습니다."
         )
+    return header, body, offsets, xyz
+
+
+def _extract_normals_and_views(body: bytes, offsets: np.ndarray) -> tuple[np.ndarray, list[np.ndarray]]:
+    """`_parse_dense_ply()`가 찾아둔 레코드 경계로 법선과 view_indices를 추가로 뽑는다.
+
+    Returns:
+        (법선 배열(N,3), 점마다 다른 길이의 view_indices 배열 리스트(N개)).
+    """
+    n = len(offsets) - 1
+    normals = np.empty((n, 3), dtype=np.float32)
+    views: list[np.ndarray] = []
+    for i in range(n):
+        pos = offsets[i]
+        normals[i] = struct.unpack_from("<3f", body, pos + 15)  # xyz(12)+rgb(3) 다음
+        n_idx = body[pos + 27]
+        if n_idx:
+            views.append(np.frombuffer(body, dtype="<u4", count=n_idx, offset=pos + 28).copy())
+        else:
+            views.append(np.empty(0, dtype=np.uint32))
+    return normals, views
+
+
+def filter_grazing_points(
+    dense_ply_path: Path,
+    sparse_dir: Path,
+    out_path: Path,
+    *,
+    min_score: float = 0.3,
+) -> tuple[int, int]:
+    """표면 법선이 관측 카메라 시선과 거의 접선(grazing)인 점을 제거한다.
+
+    occlusion 경계의 "flying pixel" 노이즈를 겨냥한 필터 — 어느 카메라에서
+    봐도 표면이 옆으로 누워 보이는 점을 지운다. 경계 노이즈 제거 효과는
+    미검증(육안 확인 필요, `dense_mvs_results/README.md` 참고), 발바닥은
+    안 건드린다는 것만 실측 확인됨.
+
+    Args:
+        dense_ply_path: view_indices/view_weights/normal 필드가 있는 dense PLY.
+        sparse_dir: OpenMVS가 실제로 쓴 언디스토션된 sparse 재구성
+            (`undistort_for_dense()` 출력) — `run_sparse_sfm()`의 원본이
+            아님(카메라 인덱스가 다르게 매겨짐).
+        min_score: 관측된 모든 뷰에 대한 평균 |cos(법선, 시선방향)|이 이
+            미만이면 제거(0=접선, 1=정면). 관측 정보 없는 점은 유지.
+
+    Returns:
+        (원본 점 개수, 유지된 점 개수).
+    """
+    header, body, offsets, xyz = _parse_dense_ply(dense_ply_path)
+    normals, views = _extract_normals_and_views(body, offsets)
+    n = len(xyz)
+
+    recon = pycolmap.Reconstruction(str(sparse_dir))
+    imgs_sorted = sorted(recon.images.items())
+    camera_centers = np.array([img.projection_center() for _, img in imgs_sorted])
+
+    scores = np.ones(n, dtype=np.float32)  # 관측 정보 없는 점은 "정면"으로 취급(제거 안 함)
+    for i in range(n):
+        v = views[i]
+        if len(v) == 0:
+            continue
+        dirs = camera_centers[v] - xyz[i]
+        dirs = dirs / np.linalg.norm(dirs, axis=1, keepdims=True)
+        scores[i] = np.abs(dirs @ normals[i]).mean()
+
+    keep = scores >= min_score
+    kept_n = int(keep.sum())
+    print(
+        f"[dense] grazing-angle 필터: {n:,} -> {kept_n:,}개 ({kept_n/n:.1%} 유지, "
+        f"min_score={min_score})"
+    )
+
+    chunks = [body[offsets[i]:offsets[i + 1]] for i in np.where(keep)[0]]
+    new_body = b"".join(chunks)
+    new_header = header.replace(f"element vertex {n}\n", f"element vertex {kept_n}\n")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_bytes(new_header.encode("ascii") + new_body)
+    return n, kept_n
+
+
+def filter_by_reprojection_consistency(
+    dense_ply_path: Path,
+    sparse_dir: Path,
+    masks_dir: Path,
+    out_path: Path,
+    *,
+    min_vote_ratio: float = 0.6,
+) -> tuple[int, int]:
+    """씬의 카메라 전부(점의 원래 관측 뷰가 아니라)에 재투영해 최종 마스크와
+    동의하는 비율이 낮은 점을 제거한다.
+
+    특정 프레임 하나의 마스크 오분류(예: 배경 물체가 사람/피부로 오분류)에
+    낚이지 않고, 다수 뷰의 합의를 따르는 필터.
+
+    Args:
+        masks_dir: `masking.generate_masks()` 원본 마스크 폴더(OpenMVS 변환
+            전, `<원본파일명>.png`).
+        min_vote_ratio: 이 미만이면 제거(0~1). 실측(test03, 의자 오염 vs
+            발 대조군): 0.6에서 의자 후보 44% 제거/발 오제거 11%, 0.7에서
+            74%/17%.
+
+    Returns:
+        (원본 점 개수, 유지된 점 개수).
+    """
+    header, body, offsets, xyz = _parse_dense_ply(dense_ply_path)
+    n = len(xyz)
+
+    recon = pycolmap.Reconstruction(str(sparse_dir))
+    imgs_sorted = sorted(recon.images.items())
+
+    votes = np.zeros(n, dtype=np.float32)
+    totals = np.zeros(n, dtype=np.float32)
+    for _, img in imgs_sorted:
+        mask_path = masks_dir / f"{img.name}.png"
+        mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
+        if mask is None:
+            continue
+        h, w = mask.shape
+        cam = recon.cameras[img.camera_id]
+        cfw = img.cam_from_world()
+        pts_cam = xyz @ cfw.rotation.matrix().T + cfw.translation
+        z = pts_cam[:, 2]
+        valid = z > 1e-6
+        fx, fy, cx, cy = cam.params[0], cam.params[1], cam.params[2], cam.params[3]
+        u = np.full(n, -1.0)
+        v = np.full(n, -1.0)
+        u[valid] = pts_cam[valid, 0] / z[valid] * fx + cx
+        v[valid] = pts_cam[valid, 1] / z[valid] * fy + cy
+        in_bounds = valid & (u >= 0) & (u < w) & (v >= 0) & (v < h)
+        ui = u[in_bounds].astype(int)
+        vi = v[in_bounds].astype(int)
+        fg = np.zeros(n, dtype=bool)
+        fg[in_bounds] = mask[vi, ui] > 0
+        totals[in_bounds] += 1
+        votes[in_bounds] += fg[in_bounds]
+
+    vote_ratio = np.divide(votes, totals, out=np.zeros_like(votes), where=totals > 0)
+    keep = vote_ratio >= min_vote_ratio
+    kept_n = int(keep.sum())
+    print(
+        f"[dense] 재투영 다수결 필터: {n:,} -> {kept_n:,}개 ({kept_n/n:.1%} 유지, "
+        f"min_vote_ratio={min_vote_ratio})"
+    )
+
+    chunks = [body[offsets[i]:offsets[i + 1]] for i in np.where(keep)[0]]
+    new_body = b"".join(chunks)
+    new_header = header.replace(f"element vertex {n}\n", f"element vertex {kept_n}\n")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_bytes(new_header.encode("ascii") + new_body)
+    return n, kept_n
+
+
+def clean_dense_point_cloud(
+    dense_ply_path: Path,
+    out_path: Path,
+    *,
+    k: int = 8,
+    std_ratio: float = 2.0,
+    prune_protrusions: bool = False,
+) -> tuple[int, int]:
+    """dense 포인트클라우드에서 통계적 이상치를 제거한다 (DBSCAN 사용 안 함).
+
+    view_indices/view_weights 필드를 원본 바이트 그대로 보존해야 하는 이유는
+    `_parse_dense_ply()` 참고. DBSCAN(최대 군집 유지)은 의도적으로 안 쓴다
+    -- 모듈 docstring 3번 참고
+    Args:
+        prune_protrusions: 위 경고 참고. 켜려면 `density_ratio`/`far_percentile`을
+            대상 점군 규모에서 직접 검증한 뒤 켤 것 -- 기본은 꺼짐.
+
+    Returns:
+        (원본 점 개수, 정리 후 점 개수).
+    """
+    header, body, offsets, xyz = _parse_dense_ply(dense_ply_path)
+    n = len(xyz)
 
     inliers = filter_outlier_points(xyz, k=k, std_ratio=std_ratio)
     stat_kept_n = int(inliers.sum())
@@ -308,31 +493,22 @@ def filter_point_cloud_visibility(
     openmvs_bin: str | Path | None = None,
     output_name: str = "scene_dense_vf",
 ) -> Path:
-    """OpenMVS 내장 가시성 기반 점군 필터(모듈 docstring 12번 참고, 아직 실측 검증 전).
+    """OpenMVS 내장 가시성 기반 점군 필터. `DensifyPointCloud`를 필터 전용
+    모드로 재호출한다(densify와 같은 호출에 넣으면 무효 -- 별도 2차 호출 필요).
 
-    `DensifyPointCloud`를 densify 없이 필터 전용 모드로 재호출한다 -- 소스
-    확인 결과 `--filter-point-cloud`는 `DenseReconstruction()`(실제 densify)
-    *이전*에 체크되므로, densify와 같은 호출에 넣으면 아무 점군도 없는
-    상태에서 필터가 실행돼 무효하다. 반드시 이미 만들어둔 점군을 `-p`로
-    불러들이는 별도 2차 호출이어야 한다.
+    **주의**: 출력 PLY는 view_indices/view_weights 필드가 없다 --
+    `run_reconstruct_mesh()`에 그대로 넘기면 크래시하니 `restore_point_cloud_views()`로
+    복원 후 넘길 것(`run_dense_pipeline()`은 이미 그렇게 엮여 있음).
 
     Args:
-        point_cloud_ply: 필터링할 기존 점군(`clean_dense_point_cloud()` 출력 등).
-        threshold: 음수만 필터를 발동시킨다(0 이상이면 OpenMVS가 그냥
-            건너뜀 -- 소스 확인). 절댓값이 클수록 더 공격적으로 제거.
-            기본 -1은 보수적인 시작값 -- 실측 없이 더 큰 값을 기본으로
-            두지 않는다.
+        point_cloud_ply: 필터링할 기존 점군(view 필드 있어야 함).
+        threshold: 음수만 필터 발동(절댓값 클수록 공격적).
 
     Returns:
-        필터링된 점군 경로(OpenMVS가 `<output_name>_filtered.ply`로 저장).
+        필터링된(view 필드 없는) 점군 경로.
     """
     if threshold >= 0:
         raise ValueError(f"threshold는 음수여야 필터가 발동합니다(소스 확인) -- 받은 값: {threshold}")
-    print(
-        "[dense][경고] filter_point_cloud_visibility()는 실측 결과(2026-08-11, test03) "
-        "이 출력을 run_reconstruct_mesh()에 넘기면 ACCESS_VIOLATION으로 재현 가능하게 "
-        "죽는 걸로 확인됐다(모듈 docstring 12번 참고) -- 원인 미해결. 계속 진행함."
-    )
     bin_dir = _resolve_openmvs_bin(openmvs_bin)
     _run_openmvs(
         "DensifyPointCloud.exe",
@@ -342,12 +518,68 @@ def filter_point_cloud_visibility(
     return workdir / f"{output_name}_filtered.ply"
 
 
+def restore_point_cloud_views(
+    view_source_ply: Path,
+    filtered_ply: Path,
+    out_path: Path,
+) -> tuple[int, int]:
+    """`filter_point_cloud_visibility()`가 지운 view 필드를 좌표 매칭으로 복원한다.
+
+    필터는 좌표를 안 건드리고 부분집합만 골라내므로, 필터를 통과한 각 점을
+    `view_source_ply`(필터 입력, view 필드 있음)에서 좌표로 찾아 그 레코드를
+    그대로 복사해 붙인다.
+
+    Args:
+        view_source_ply: 필터의 입력으로 쓴, view 필드가 있는 점군.
+        filtered_ply: `filter_point_cloud_visibility()`의 출력.
+        out_path: view 필드가 복원된 결과 -- `run_reconstruct_mesh()`에 넘길 것.
+
+    Returns:
+        (필터링된 점 개수, 좌표 매칭에 성공해 복원된 점 개수).
+    """
+    header, body, offsets, xyz = _parse_dense_ply(view_source_ply)
+    xyz_to_idx = {(float(x), float(y), float(z)): i for i, (x, y, z) in enumerate(xyz)}
+
+    filt_data = filtered_ply.read_bytes()
+    filt_header_end = filt_data.index(b"end_header\n") + len(b"end_header\n")
+    filt_header = filt_data[:filt_header_end].decode("ascii")
+    filt_body = filt_data[filt_header_end:]
+    filt_n = int([line for line in filt_header.splitlines() if line.startswith("element vertex")][0].split()[-1])
+
+    FIXED_SIZE = 27  # xyz+rgb+normal만 있는 필터 출력 스키마(view 필드 없음)
+    kept_records: list[bytes] = []
+    missing = 0
+    for i in range(filt_n):
+        x, y, z = struct.unpack_from("<3f", filt_body, i * FIXED_SIZE)
+        idx = xyz_to_idx.get((float(x), float(y), float(z)))
+        if idx is None:
+            missing += 1
+            continue
+        kept_records.append(body[offsets[idx]:offsets[idx + 1]])
+    if missing:
+        print(
+            f"[dense][경고] 필터 결과 {missing}/{filt_n}개 점이 원본과 좌표 매칭 실패 -- "
+            "view 필드 없이는 못 살리므로 건너뜀(예상외로 많으면 filter_point_cloud_visibility()가 "
+            "좌표를 실제로 바꾸는 다른 OpenMVS 버전일 수 있음, 재검증 필요)."
+        )
+
+    new_body = b"".join(kept_records)
+    new_header = header.replace(
+        f"element vertex {len(xyz)}\n", f"element vertex {len(kept_records)}\n"
+    )
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_bytes(new_header.encode("ascii") + new_body)
+    return filt_n, len(kept_records)
+
+
 def run_refine_mesh(
     scene_mvs: Path,
     mesh_ply: Path,
     workdir: Path,
     *,
     openmvs_bin: str | Path | None = None,
+    decimate: float = 1.0,
+    regularity_weight: float | None = None,
     output_name: str = "scene_mesh_refined.mvs",
 ) -> Path:
     """사진 광도일관성 기반으로 메쉬 정점 위치를 보정한다 (선택적, 가장 느린 단계).
@@ -356,12 +588,20 @@ def run_refine_mesh(
     실제로 줄이는 효과가 육안 확인됐지만, 전체 파이프라인 소요시간의
     70~72%를 차지하는 압도적 병목이다(실측: 1.5~9분) -- 빠른 반복
     실험에서는 건너뛸 것.
+
+    Args:
+        decimate: refine 전 입력 메쉬 단순화 정도(0~1). OpenMVS 기본값 0은
+            "auto"로 공격적으로 단순화한다(실측: 123,477 -> 17,478 faces) --
+            이 함수 기본값은 1(단순화 끔, 해상도 보존).
+        regularity_weight: photo-consistency 대 표면 정규화(smoothness) 항
+            가중치. `None`이면 OpenMVS 기본값(0.2) 사용.
     """
     bin_dir = _resolve_openmvs_bin(openmvs_bin)
+    args = [scene_mvs.name, "-m", mesh_ply.name, "-o", output_name, "--decimate", str(decimate)]
+    if regularity_weight is not None:
+        args += ["--regularity-weight", str(regularity_weight)]
     _run_openmvs(
-        "RefineMesh.exe",
-        [scene_mvs.name, "-m", mesh_ply.name, "-o", output_name],
-        workdir, bin_dir, "log_refine_mesh.txt",
+        "RefineMesh.exe", args, workdir, bin_dir, "log_refine_mesh.txt",
     )
     return workdir / output_name.replace(".mvs", ".ply")
 
@@ -485,6 +725,60 @@ def keep_largest_component(mesh: trimesh.Trimesh) -> tuple[trimesh.Trimesh, int,
         return mesh, total_faces, total_faces
     largest = max(components, key=lambda c: len(c.faces))
     return largest, total_faces, len(largest.faces)
+
+
+def smooth_high_curvature_regions(
+    mesh: trimesh.Trimesh,
+    *,
+    curvature_percentile: float = 90.0,
+    rings: int = 5,
+    iterations: int = 10,
+    alpha: float = 0.6,
+) -> trimesh.Trimesh:
+    """곡률이 튀는 정점과 그 주변 링만 라플라시안으로 스무딩한다. 나머지
+    정점은 그대로 둔다.
+
+    관측 부족으로 생긴 크레이터형 결함 완화용(실측 확인) -- 노이즈와 진짜
+    굴곡을 구분하지 못해 발가락 사이 같은 진짜 디테일도 함께 뭉개진다.
+    받아들이기로 한 트레이드오프 -- `dense_mvs_results/README.md` 참고.
+
+    Args:
+        curvature_percentile: 이 백분위 이상 |곡률|인 정점을 코어로 삼는다.
+        rings: 코어에서 몇 단계 인접 정점까지 감쇠 가중치로 확산시킬지.
+    """
+    v = mesh.vertices.copy()
+    n = len(v)
+    edge_len = np.linalg.norm(v[mesh.edges[:, 0]] - v[mesh.edges[:, 1]], axis=1)
+    radius = float(np.median(edge_len)) * 4
+    curv = trimesh.curvature.discrete_mean_curvature_measure(mesh, v, radius)
+
+    thresh = np.percentile(np.abs(curv), curvature_percentile)
+    core_mask = np.abs(curv) > thresh
+
+    neighbors = mesh.vertex_neighbors
+    weight = np.zeros(n)
+    weight[core_mask] = 1.0
+    frontier = set(np.where(core_mask)[0].tolist())
+    visited = set(frontier)
+    for w in np.linspace(1.0, 0.2, rings):
+        next_frontier = {nb for idx in frontier for nb in neighbors[idx] if nb not in visited}
+        for idx in next_frontier:
+            weight[idx] = max(weight[idx], w)
+        visited |= next_frontier
+        frontier = next_frontier
+
+    new_v = v.copy()
+    for _ in range(iterations):
+        avg = np.array([new_v[neighbors[i]].mean(axis=0) if len(neighbors[i]) else new_v[i] for i in range(n)])
+        new_v = new_v + weight[:, None] * alpha * (avg - new_v)
+
+    out = mesh.copy()
+    out.vertices = new_v
+    print(
+        f"[dense] 고곡률 국소 스무딩: 정점 {int((weight > 0).sum()):,}/{n:,}개 영향"
+        f"(코어 {int(core_mask.sum()):,}개, curvature_percentile={curvature_percentile})"
+    )
+    return out
 
 
 def align_principal_axes(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
@@ -624,9 +918,14 @@ def run_dense_pipeline(
     postprocess_dmaps: int = DEFAULT_POSTPROCESS_DMAPS,
     max_threads: int = DEFAULT_MAX_THREADS,
     visibility_filter_threshold: int | None = None,
+    grazing_filter_min_score: float | None = None,
+    reprojection_consistency_min_vote: float | None = None,
     free_space_support: bool = False,
     thickness_factor: float = 1.0,
     quality_factor: float = 1.0,
+    refine_decimate: float = 1.0,
+    refine_regularity_weight: float | None = None,
+    smooth_high_curvature: bool = True,
 ) -> Path:
     """위 단계 전부를 엮는 오케스트레이션. 최종 메쉬 경로를 반환한다.
 
@@ -640,12 +939,30 @@ def run_dense_pipeline(
         refine: RefineMesh(사진 광도일관성 보정)까지 돌릴지. 기본 False --
             전체 시간의 70% 이상을 차지하는 병목이라(모듈 docstring 7번),
             빠른 확인이 필요하면 끄고 최종 산출물만 켤 것.
-        visibility_filter_threshold: `filter_point_cloud_visibility()`를
-            추가로 돌릴지(모듈 docstring 12번 참고). `None`(기본)이면 안
-            돌림 -- 아직 실측 검증 전. 음수 값(예: -1)을 주면 활성화.
+        visibility_filter_threshold: `filter_point_cloud_visibility()` +
+            `restore_point_cloud_views()`를 추가로 돌릴지. `None`(기본)이면
+            안 돌림 -- 경계 노이즈에 실제로 도움이 되는지는 아직 test03
+            1건만 크래시 없이 확인됐고 결과 품질(제거되는 게 진짜 경계
+            노이즈인지, 발바닥처럼 성긴 진짜 표면까지 깎이는지)은 미검증.
+            음수 값(예: -1)을 주면 활성화.
+        grazing_filter_min_score: `filter_grazing_points()`를 추가로 돌릴지
+            (`min_score` 값으로 그대로 전달). `None`(기본)이면 안 돌림 --
+            켜면 `visibility_filter_threshold`보다 먼저(더 안쪽 단계에서)
+            적용된다. 그 함수 docstring의 "주의" 참고 -- 발바닥 보존은
+            확인됐지만 경계 노이즈 제거 효과 자체는 육안 확인 필요.
+        reprojection_consistency_min_vote: `filter_by_reprojection_consistency()`를
+            추가로 돌릴지. `None`(기본)이면 안 돌림 -- 켜면 grazing/visibility
+            필터보다 먼저(가장 안쪽 단계에서) 적용된다. 실측(test03, 의자
+            오염): 0.6에서 오염 후보 44% 제거/발 오제거 11%.
         free_space_support / thickness_factor / quality_factor:
             `run_reconstruct_mesh()`로 그대로 전달(모듈 docstring 13번 참고).
             아직 실측 검증 전이라 기본값은 OpenMVS 기본값 그대로.
+        refine_decimate / refine_regularity_weight: `refine=True`일 때
+            `run_refine_mesh()`로 그대로 전달.
+        smooth_high_curvature: `smooth_high_curvature_regions()`를 돌릴지.
+            기본 True -- 관측 부족 크레이터 완화 효과 실측 확인, 발가락
+            사이 등 진짜 디테일도 함께 뭉개지는 트레이드오프는 감수하기로
+            결정됨(`dense_mvs_results/README.md` 참고).
     """
     # OpenMVS 서브프로세스는 -w(workdir)를 cwd로 실행되므로, 그 외 입력 경로는
     # 전부 절대경로로 넘겨야 한다 -- 상대경로를 그대로 두면 cwd가 바뀐 뒤
@@ -669,11 +986,29 @@ def run_dense_pipeline(
     clean_dense_point_cloud(dense_ply, cleaned_ply)
 
     mesh_input_ply = cleaned_ply
+    if reprojection_consistency_min_vote is not None:
+        consistency_ply = openmvs_dir / "scene_dense_consistency.ply"
+        filter_by_reprojection_consistency(
+            mesh_input_ply, dense_dir / "sparse", masks_dir, consistency_ply,
+            min_vote_ratio=reprojection_consistency_min_vote,
+        )
+        mesh_input_ply = consistency_ply
+
+    if grazing_filter_min_score is not None:
+        grazing_ply = openmvs_dir / "scene_dense_degrazed.ply"
+        filter_grazing_points(
+            mesh_input_ply, dense_dir / "sparse", grazing_ply, min_score=grazing_filter_min_score,
+        )
+        mesh_input_ply = grazing_ply
+
     if visibility_filter_threshold is not None:
-        mesh_input_ply = filter_point_cloud_visibility(
-            scene_mvs, cleaned_ply, openmvs_dir,
+        filtered_ply = filter_point_cloud_visibility(
+            scene_mvs, mesh_input_ply, openmvs_dir,
             threshold=visibility_filter_threshold, openmvs_bin=openmvs_bin,
         )
+        restored_ply = openmvs_dir / "scene_dense_vf_restored.ply"
+        restore_point_cloud_views(mesh_input_ply, filtered_ply, restored_ply)
+        mesh_input_ply = restored_ply
 
     mesh_ply = run_reconstruct_mesh(
         scene_mvs, mesh_input_ply, openmvs_dir, openmvs_bin=openmvs_bin,
@@ -682,7 +1017,10 @@ def run_dense_pipeline(
     )
 
     if refine:
-        mesh_ply = run_refine_mesh(scene_mvs, mesh_ply, openmvs_dir, openmvs_bin=openmvs_bin)
+        mesh_ply = run_refine_mesh(
+            scene_mvs, mesh_ply, openmvs_dir, openmvs_bin=openmvs_bin,
+            decimate=refine_decimate, regularity_weight=refine_regularity_weight,
+        )
 
     # 뿔/스파이크 사후 프루닝(prune_thin_protrusions)은 메쉬 위상을 망가뜨려
     # 버렸다(모듈 docstring 11번) -- 점 단위 사전 제거(clean_dense_point_cloud
@@ -690,8 +1028,15 @@ def run_dense_pipeline(
     # 하나를 실측으로 검증해 켤 것. 여기서는 이미 분리된 부유 파편만 정리한다.
     mesh = trimesh.load(mesh_ply, process=False)
     mesh, faces_before, faces_after = keep_largest_component(mesh)
-    if faces_after < faces_before:
+    changed = faces_after < faces_before
+    if changed:
         print(f"[dense] 부유 파편 제거: {faces_before:,} -> {faces_after:,} faces")
+
+    if smooth_high_curvature:
+        mesh = smooth_high_curvature_regions(mesh)
+        changed = True
+
+    if changed:
         mesh.export(mesh_ply)
 
     print(f"[dense] 완료: {mesh_ply}")

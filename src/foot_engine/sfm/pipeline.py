@@ -80,9 +80,14 @@ def run_pipeline(
     postprocess_dmaps: int = dense.DEFAULT_POSTPROCESS_DMAPS,
     dense_max_threads: int = dense.DEFAULT_MAX_THREADS,
     visibility_filter_threshold: int | None = None,
+    grazing_filter_min_score: float | None = None,
+    reprojection_consistency_min_vote: float | None = None,
     free_space_support: bool = False,
     thickness_factor: float = 1.0,
     quality_factor: float = 1.0,
+    refine_decimate: float = 1.0,
+    refine_regularity_weight: float | None = None,
+    smooth_high_curvature: bool = True,
 ) -> PipelineResult:
     """영상/사진 -> 발/피부 마스크 -> sparse SfM -> dense MVS -> 스케일 보정 메쉬.
 
@@ -109,11 +114,19 @@ def run_pipeline(
             군집화를 추가로 적용할지. 최종 dense 메쉬에는 영향 없다 — dense
             경로는 DBSCAN을 의도적으로 안 쓴다(`dense.py` docstring 3번 참고).
         openmvs_bin / refine / postprocess_dmaps / dense_max_threads /
-        visibility_filter_threshold / free_space_support / thickness_factor /
-        quality_factor: `dense.run_dense_pipeline()`으로 그대로 전달. 튜닝
-            근거는 `dense.py` 모듈 docstring 참고 — 뒤 네 개(가시성 필터,
-            메쉬 정밀도 가중치)는 2026-08-11 시점 아직 실측 검증 전이라
-            기본값은 전부 "안 건드림"이다.
+        visibility_filter_threshold / grazing_filter_min_score /
+        reprojection_consistency_min_vote / free_space_support /
+        thickness_factor / quality_factor / refine_decimate /
+        refine_regularity_weight / smooth_high_curvature:
+            `dense.run_dense_pipeline()`으로 그대로 전달. 튜닝 근거는
+            `dense.py` 모듈 docstring 및 `dense_mvs_results/README.md` 참고.
+            `refine_decimate`(기본 1=해상도 보존)와 `smooth_high_curvature`
+            (기본 True=크레이터 완화)는 2026-08-11 test03 실측으로 검증된
+            기본값이다. `reprojection_consistency_min_vote`(배경 오염 제거)와
+            `refine`(느림)은 다른 필터들과 마찬가지로 기본 꺼짐 — 다른
+            촬영본에서도 안전한지 아직 test03 1건만 검증됨. free_space_support/
+            thickness_factor는 실측에서 부작용(메쉬 뒤틀림)만 확인돼 기본값
+            (꺼짐/1.0)을 건드리지 말 것.
 
     Returns:
         산출물 경로와 요약 통계를 담은 `PipelineResult`.
@@ -166,8 +179,10 @@ def run_pipeline(
     )
     print(
         f"[마스크] {mask_stats['total']}장 처리 "
-        f"(원본 전체 폴백 {mask_stats['fallback']}장, 피부 정제 적용 {mask_stats['refined']}장, "
-        f"발 미검출 제외 {mask_stats['rejected']}장)"
+        f"(피부 정제 적용 {mask_stats['refined']}장, 제외 {mask_stats['rejected']}장 "
+        f"— 발 미검출 {mask_stats['rejected_reasons']['no_foot']}, "
+        f"세그멘테이션 애매 {mask_stats['rejected_reasons']['low_coverage']}, "
+        f"피부 정제 붕괴 {mask_stats['rejected_reasons']['skin_refine_collapsed']})"
     )
     if mask_stats["rejected"]:
         rejected = set(mask_stats["rejected_names"])
@@ -218,8 +233,12 @@ def run_pipeline(
         workdir=dense_workdir, openmvs_bin=openmvs_bin, refine=refine,
         postprocess_dmaps=postprocess_dmaps, max_threads=dense_max_threads,
         visibility_filter_threshold=visibility_filter_threshold,
+        grazing_filter_min_score=grazing_filter_min_score,
+        reprojection_consistency_min_vote=reprojection_consistency_min_vote,
         free_space_support=free_space_support, thickness_factor=thickness_factor,
-        quality_factor=quality_factor,
+        quality_factor=quality_factor, refine_decimate=refine_decimate,
+        refine_regularity_weight=refine_regularity_weight,
+        smooth_high_curvature=smooth_high_curvature,
     )
 
     # 부유 파편 제거(keep_largest_component)는 dense.run_dense_pipeline() 안에서
