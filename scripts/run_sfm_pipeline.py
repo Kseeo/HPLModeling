@@ -1,21 +1,27 @@
-"""영상/사진 한 벌 -> 변형된 발 메쉬. `foot_engine.sfm` 전체를 한 번에 돌리는 CLI.
+"""영상/사진 한 벌 -> dense MVS 발 메쉬. `foot_engine.sfm` 전체를 한 번에 돌리는 CLI.
 
-내부적으로 아래 네 단계를 순서대로 실행한다(각 단계를 따로 돌리고 싶으면
+내부적으로 아래 단계를 순서대로 실행한다(각 단계를 따로 돌리고 싶으면
 `sparse_sfm_prototype.py` / `generate_foot_masks.py` / `clean_point_cloud.py` /
-`fit_deformer_to_pointcloud.py`를 개별적으로 쓸 것 — 중간 결과를 실제 뷰어로
-확인하고 싶을 때 유용하다):
+`run_dense_pipeline.py`를 개별적으로 쓸 것 — 중간 결과를 실제 뷰어로 확인하고
+싶을 때 유용하다):
 
     1. (영상이면) 프레임 추출
     2. 발/피부 마스크 생성 (rembg + MediaPipe 피부 정제)
     3. Sparse SfM 복원 (pycolmap)
-    4. 배경 제거 + 템플릿 워프
+    4. Dense MVS + 메싱 (OpenMVS, 별도 설치 필요 — README 참고)
+    5. 스케일 보정(자기신고 발길이 기준, 없으면 placeholder)
+
+2026-08-10부로 `FootMeshDeformer` 템플릿 워프 경로를 대체했다 —
+`sfm/pipeline.py` 모듈 docstring 참고.
+
+**OpenMVS 별도 설치 필요**: `OPENMVS_BIN_DIR` 환경변수를 실행파일 폴더로
+설정하거나 `--openmvs-bin`으로 직접 넘길 것. 설치 방법은 README 참고.
 
 사용 예::
 
     python scripts/run_sfm_pipeline.py --video data/samples/test00.mp4 `
-        --template data/templates/S0001_real_template.stl `
-        --side right --template-side left `
-        --out data/output/test00_pipeline_fit.stl `
+        --reference-length-mm 255 `
+        --out data/output/test00_pipeline_fit.ply `
         --workdir data/output/sfm_pipeline/test00_run
 """
 
@@ -37,26 +43,21 @@ for _stream_name in ("stdout", "stderr"):
         except Exception:
             pass
 
-from foot_engine.sfm.fitting import default_template_path  # noqa: E402
+from foot_engine.sfm import dense  # noqa: E402
 from foot_engine.sfm.pipeline import run_pipeline  # noqa: E402
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="영상/사진 -> 발 메쉬, 파이프라인 전체 실행")
+    parser = argparse.ArgumentParser(description="영상/사진 -> dense 발 메쉬, 파이프라인 전체 실행")
     src = parser.add_mutually_exclusive_group(required=True)
     src.add_argument("--video", type=Path, help="순서대로 촬영된 영상 파일")
     src.add_argument("--images-dir", type=Path, help="이미 추출된, 순서가 보존된 이미지 폴더")
     parser.add_argument("--workdir", type=Path, required=True, help="중간 산출물 저장 폴더")
-    parser.add_argument("--out", type=Path, required=True, help="최종 변형된 메쉬 저장 경로(.stl)")
-    parser.add_argument("--template", type=Path, default=None, help="기준 템플릿 STL(생략 시 절차적 생성)")
+    parser.add_argument("--out", type=Path, required=True, help="최종 메쉬 저장 경로(.ply 등)")
     parser.add_argument(
-        "--side", choices=["left", "right"], default=None,
-        help="입력 영상이 실제로 어느 쪽 발인지. --template-side와 다르면 자동 미러링한다. "
-             "생략하면 좌우 확인을 건너뛴다(주의: 다르면 결과가 뒤틀림).",
-    )
-    parser.add_argument(
-        "--template-side", choices=["left", "right"], default="right",
-        help="템플릿의 실제 발 좌우(기본 right).",
+        "--reference-length-mm", type=float, default=None,
+        help="자기신고 발길이(mm). 있으면 최종 메쉬를 이 길이에 맞춰 스케일링한다"
+             "(SfM은 절대 축척이 없음). 생략하면 250mm placeholder로 스케일링하고 경고 출력.",
     )
     parser.add_argument("--interval", type=float, default=0.5, help="영상에서 프레임을 뽑을 간격(초)")
     parser.add_argument("--start-time", type=float, default=0.0, help="사용할 구간의 시작 시각(초)")
@@ -89,21 +90,29 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--no-cluster", dest="cluster", action="store_false", default=True,
-        help="정리된 점군에 DBSCAN 군집화를 적용하지 않는다(기본은 적용).",
+        help="QA용 cleaned_points.ply에 DBSCAN 군집화를 적용하지 않는다(기본은 적용). "
+             "최종 dense 메쉬에는 영향 없음.",
     )
-    parser.add_argument("--rng-seed", type=int, default=0)
+    parser.add_argument("--openmvs-bin", type=str, default=None, help="OpenMVS 실행파일 폴더(생략 시 OPENMVS_BIN_DIR 환경변수)")
+    parser.add_argument(
+        "--refine", action="store_true",
+        help="RefineMesh(사진 광도일관성 보정)까지 실행. 전체 소요시간의 70%%+ 를 "
+             "차지하는 병목이라(실측) 기본은 끔 — 최종 산출물에만 켤 것.",
+    )
+    parser.add_argument("--no-gapfill", dest="postprocess_dmaps", action="store_const", const=0,
+                         default=dense.DEFAULT_POSTPROCESS_DMAPS,
+                         help="저텍스처 평면 공백 메우기(--postprocess-dmaps)를 끈다.")
+    parser.add_argument("--dense-max-threads", type=int, default=dense.DEFAULT_MAX_THREADS,
+                         help=f"DensifyPointCloud 스레드 상한(기본 {dense.DEFAULT_MAX_THREADS}) — "
+                              "원인불명 간헐적 크래시 방지용(실측 근거 dense.py 참고).")
     args = parser.parse_args(argv)
-
-    template_path = args.template or default_template_path(ROOT)
 
     result = run_pipeline(
         workdir=args.workdir,
-        template_path=template_path,
         out_mesh=args.out,
         video=args.video,
         images_dir=args.images_dir,
-        side=args.side,
-        template_side=args.template_side,
+        reference_length_mm=args.reference_length_mm,
         interval=args.interval,
         start_time=args.start_time,
         end_time=args.end_time,
@@ -114,16 +123,23 @@ def main(argv: list[str] | None = None) -> int:
         mask_during_extraction=args.mask_during_extraction,
         skin_refine=args.skin_refine,
         cluster=args.cluster,
-        rng_seed=args.rng_seed,
+        openmvs_bin=args.openmvs_bin,
+        refine=args.refine,
+        postprocess_dmaps=args.postprocess_dmaps,
+        dense_max_threads=args.dense_max_threads,
     )
 
     print("\n[파이프라인 요약]")
     if result.quality_stats:
         print(f"  QC: {result.quality_stats}")
     print(f"  등록된 이미지: {result.n_points_registered_images} / {result.n_points_total_images}")
-    print(f"  sparse 점: {result.n_points_raw:,}개 -> 정리 후: {result.n_points_cleaned:,}개")
+    print(f"  sparse 점: {result.n_points_raw:,}개 -> 정리 후(QA용): {result.n_points_cleaned:,}개")
     print(f"  마스크: {result.mask_stats}")
-    print(f"  최종 메쉬: {result.output_mesh_path}")
+    print(
+        f"  최종 메쉬: 정점 {result.n_mesh_vertices:,}개, 면 {result.n_mesh_faces:,}개, "
+        f"스케일 x{result.scale_factor:.4f}"
+    )
+    print(f"  저장 경로: {result.output_mesh_path}")
     return 0
 
 
