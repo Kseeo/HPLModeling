@@ -94,17 +94,31 @@ def add_dense_args(
              "뭉개지는 트레이드오프는 감수하기로 결정됨.",
     )
     parser.add_argument(
-        "--fill-holes", action="store_true",
-        help="작은 구멍(핀홀)만 크기 필터로 골라 팬 삼각분할로 메운다(fill_small_holes). "
-             "발바닥 등 큰 구멍은 그대로 둔다. 기본 꺼짐 — 아직 실측 검증 전. "
-             "폴리곤은 추가만 되고 기존 정점/면은 그대로다.",
+        "--curvature-percentile", type=float, default=dense.DEFAULT_CURVATURE_PERCENTILE,
+        help=f"고곡률 스무딩 코어 판정 기준(이 백분위 이상 |곡률|, 기본 "
+             f"{dense.DEFAULT_CURVATURE_PERCENTILE}). 낮출수록 더 넓은 영역이 스무딩된다.",
     )
     parser.add_argument(
-        "--sand-surface", dest="sand_surface_enabled", action="store_true",
-        help="전체 정점을 국소 이차곡면(quadric)에 투영해 다듬는다(sand_surface) — "
-             "곡률 임계값 없이 발 전체에 균일 적용, --no-smooth-high-curvature와 달리 "
-             "크레이터 전용이 아닌 일반 노이즈 완화. 기본 꺼짐 — 아직 실측 검증 전. "
-             "정점/면 개수는 그대로다.",
+        "--curvature-rings", type=int, default=dense.DEFAULT_CURVATURE_RINGS,
+        help=f"코어에서 인접 정점으로 감쇠 확산시킬 링 수(기본 {dense.DEFAULT_CURVATURE_RINGS}).",
+    )
+    parser.add_argument(
+        "--curvature-iterations", type=int, default=dense.DEFAULT_CURVATURE_ITERATIONS,
+        help=f"라플라시안 반복 횟수(기본 {dense.DEFAULT_CURVATURE_ITERATIONS}). 늘릴수록 더 매끄러워짐.",
+    )
+    parser.add_argument(
+        "--curvature-alpha", type=float, default=dense.DEFAULT_CURVATURE_ALPHA,
+        help=f"반복당 이동 비율(0~1, 기본 {dense.DEFAULT_CURVATURE_ALPHA}).",
+    )
+    parser.add_argument(
+        "--no-fill-holes", dest="fill_holes", action="store_false",
+        help="작은 구멍(핀홀)만 크기 필터로 골라 메우는 fill_small_holes를 끈다. "
+             "기본 켜짐(2026-08-12 육안 검증) — 발바닥 등 큰 구멍은 원래 안 건드린다.",
+    )
+    parser.add_argument(
+        "--no-sand-surface", dest="sand_surface_enabled", action="store_false",
+        help="전체 정점을 국소 이차곡면에 투영해 다듬는 sand_surface를 끈다. "
+             "기본 켜짐(2026-08-12 육안 검증) — 정점/면 개수는 그대로다.",
     )
     parser.add_argument(
         "--prune-protrusions", action="store_true",
