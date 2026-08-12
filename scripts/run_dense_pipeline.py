@@ -103,6 +103,7 @@ def main(argv: list[str] | None = None) -> int:
         smooth_high_curvature=args.smooth_high_curvature,
         fill_holes=args.fill_holes,
         sand_surface_enabled=args.sand_surface_enabled,
+        prune_protrusions=args.prune_protrusions,
         keep_intermediates=args.keep_intermediates,
     )
     print(f"\n최종 메쉬: {mesh_path}")

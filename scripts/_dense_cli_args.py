@@ -107,6 +107,12 @@ def add_dense_args(
              "정점/면 개수는 그대로다.",
     )
     parser.add_argument(
+        "--prune-protrusions", action="store_true",
+        help="포인트클라우드 단계(메싱 전)에서 국소 밀도 기준으로 뿔/스파이크 후보 점을 "
+             "미리 제거한다(clean_dense_point_cloud prune_protrusions). 발목 부근 뿔 결함을 "
+             "겨냥한 대책. 기본 꺼짐 — 아직 실측 검증 전.",
+    )
+    parser.add_argument(
         "--keep-intermediates", action="store_true",
         help="완료 후 중간 산출물을 지우지 않고 그대로 둔다(이 스크립트가 만든 범위 — "
              "run_dense_pipeline.py는 undistort 워크스페이스/depth map/OpenMVS 로그, "
