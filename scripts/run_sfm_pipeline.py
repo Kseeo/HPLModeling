@@ -28,22 +28,11 @@
 from __future__ import annotations
 
 import argparse
-import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "src"))  # 패키지 설치 없이도 실행되도록
+import _cli_common  # noqa: F401  -- sys.path 설정 + 콘솔 UTF-8 고정(부작용 import)
+from _dense_cli_args import add_dense_args  # noqa: E402
 
-# cp949 등 비-UTF8 콘솔에서 한글 출력이 깨지거나 죽는 문제 방지(실측 확인, 2026-08-07).
-for _stream_name in ("stdout", "stderr"):
-    _stream = getattr(sys, _stream_name, None)
-    if _stream is not None and hasattr(_stream, "reconfigure"):
-        try:
-            _stream.reconfigure(encoding="utf-8", errors="backslashreplace")
-        except Exception:
-            pass
-
-from foot_engine.sfm import dense  # noqa: E402
 from foot_engine.sfm.pipeline import run_pipeline  # noqa: E402
 
 
@@ -93,64 +82,7 @@ def main(argv: list[str] | None = None) -> int:
         help="QA용 cleaned_points.ply에 DBSCAN 군집화를 적용하지 않는다(기본은 적용). "
              "최종 dense 메쉬에는 영향 없음.",
     )
-    parser.add_argument("--openmvs-bin", type=str, default=None, help="OpenMVS 실행파일 폴더(생략 시 OPENMVS_BIN_DIR 환경변수)")
-    parser.add_argument(
-        "--refine", action="store_true",
-        help="RefineMesh(사진 광도일관성 보정)까지 실행. 전체 소요시간의 70%%+ 를 "
-             "차지하는 병목이라(실측) 기본은 끔 — 최종 산출물에만 켤 것.",
-    )
-    parser.add_argument("--no-gapfill", dest="postprocess_dmaps", action="store_const", const=0,
-                         default=dense.DEFAULT_POSTPROCESS_DMAPS,
-                         help="저텍스처 평면 공백 메우기(--postprocess-dmaps)를 끈다.")
-    parser.add_argument("--dense-max-threads", type=int, default=dense.DEFAULT_MAX_THREADS,
-                         help=f"DensifyPointCloud 스레드 상한(기본 {dense.DEFAULT_MAX_THREADS}) — "
-                              "원인불명 간헐적 크래시 방지용(실측 근거 dense.py 참고).")
-    parser.add_argument(
-        "--visibility-filter-threshold", type=int, default=None,
-        help="OpenMVS 내장 가시성 필터(--filter-point-cloud) 임계값(음수, 예: -1). "
-             "생략(기본)하면 안 돌림 — dense.py 모듈 docstring 5번 참고, 발바닥 보존은 "
-             "확인됐지만 경계 노이즈 제거 효과는 육안 검증 필요.",
-    )
-    parser.add_argument(
-        "--grazing-filter-min-score", type=float, default=None,
-        help="법선-시선 grazing-angle 필터(filter_grazing_points) 임계값(0~1, 예: 0.3). "
-             "생략(기본)하면 안 돌림 — dense.py의 filter_grazing_points() docstring 참고, "
-             "발바닥 보존은 확인됐지만 경계 노이즈 제거 효과는 육안 검증 필요.",
-    )
-    parser.add_argument(
-        "--reprojection-consistency-min-vote", type=float, default=None,
-        help="전체 카메라 재투영 다수결 필터(filter_by_reprojection_consistency) 임계값(0~1, "
-             "예: 0.6). 생략(기본)하면 안 돌림 — 실측(test03, 배경 오염): 0.6에서 오염 후보 "
-             "44%% 제거/발 오제거 11%%.",
-    )
-    parser.add_argument(
-        "--free-space-support", action="store_true",
-        help="ReconstructMesh --free-space-support 켬 — 실측 확인: 메쉬가 뾰족하게 뒤틀리는 "
-             "부작용이 있어 권장 안 함(dense_mvs_results/README.md 참고).",
-    )
-    parser.add_argument("--thickness-factor", type=float, default=1.0,
-                         help="ReconstructMesh --thickness-factor(기본 1.0=OpenMVS 기본값). "
-                              "실측 확인: 2.0에서도 위 free-space-support와 같은 부작용 발생.")
-    parser.add_argument("--quality-factor", type=float, default=1.0,
-                         help="ReconstructMesh --quality-factor(기본 1.0=OpenMVS 기본값).")
-    parser.add_argument("--refine-decimate", type=float, default=1.0,
-                         help="RefineMesh --decimate(0~1, 기본 1=단순화 끔·해상도 보존). "
-                              "`--refine` 켰을 때만 적용.")
-    parser.add_argument("--refine-regularity-weight", type=float, default=None,
-                         help="RefineMesh --regularity-weight(생략 시 OpenMVS 기본값 0.2). "
-                              "`--refine` 켰을 때만 적용.")
-    parser.add_argument(
-        "--no-smooth-high-curvature", dest="smooth_high_curvature", action="store_false",
-        help="고곡률 국소 스무딩(smooth_high_curvature_regions)을 끈다. 기본 켜짐 — "
-             "관측 부족 크레이터 완화 효과 실측 확인, 발가락 사이 등 디테일도 함께 "
-             "뭉개지는 트레이드오프는 감수하기로 결정됨.",
-    )
-    parser.add_argument(
-        "--keep-intermediates", action="store_true",
-        help="완료 후 --workdir 안의 중간 산출물(프레임/마스크/DB/sparse 복원/dense "
-             "스크래치)을 지우지 않고 그대로 둔다. 기본은 끔(정리) — --out 파일 하나만 "
-             "남는다. run_dense_pipeline.py로 dense 파라미터를 따로 다시 튜닝하려면 켤 것.",
-    )
+    add_dense_args(parser, thread_flag="--dense-max-threads", thread_dest="dense_max_threads")
     args = parser.parse_args(argv)
 
     result = run_pipeline(

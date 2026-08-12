@@ -144,6 +144,7 @@ def generate_masks(
     skin_refine: bool = True,
     skin_model: Path = DEFAULT_SKIN_MODEL_PATH,
     skin_erode: int = 8,
+    extra_dilations: list[tuple[Path, int]] | None = None,
 ) -> dict:
     """이미지 폴더(또는 그 안 일부)의 발/피부 마스크를 생성해 `out_dir`에 저장한다.
 
@@ -162,6 +163,12 @@ def generate_masks(
         skin_refine: MediaPipe로 옷/장신구를 추가 제외할지.
         skin_model: MediaPipe Selfie Multiclass 모델(.tflite) 경로.
         skin_erode: 피부 마스크 경계를 깎는 폭(px) — 옷-피부 경계선 잔여 오염 완화용.
+        extra_dilations: `(out_dir, dilate)` 쌍 목록. rembg/피부 정제 추론
+            (비싼 부분)은 한 번만 돌리고, 각 쌍에 대해 팽창 폭만 다르게 적용해
+            추가로 저장한다 — sparse SfM용(dilate=15)과 dense MVS용(dilate=0)
+            마스크를 한 번에 만들 때 세그멘테이션 추론이 중복 실행되는 걸 막는다.
+            판정(수락/제외)은 팽창 전 단계에서 정해지므로 모든 출력이 동일한
+            판정을 공유한다.
 
     Returns:
         {"total": 처리한 장 수, "refined": 피부 정제가 적용된 장 수,
@@ -171,9 +178,14 @@ def generate_masks(
     if not images_dir.is_dir():
         raise FileNotFoundError(f"이미지 폴더가 없습니다: {images_dir}")
 
-    out_dir.mkdir(parents=True, exist_ok=True)
+    outputs = [(out_dir, dilate)] + list(extra_dilations or [])
+    kernels = [
+        (out, np.ones((d, d), np.uint8) if d > 0 else None) for out, d in outputs
+    ]
+    for out, _ in outputs:
+        out.mkdir(parents=True, exist_ok=True)
+
     session = new_session(model)
-    kernel = np.ones((dilate, dilate), np.uint8) if dilate > 0 else None
 
     skin_segmenter = None
     if skin_refine:
@@ -221,10 +233,10 @@ def generate_masks(
         if rejected:
             mask = np.zeros(mask.shape, dtype=np.uint8)
             rejected_names.append(path.name)
-        elif kernel is not None:
-            mask = cv2.dilate(mask, kernel)
 
-        cv2.imwrite(str(out_dir / f"{path.name}.png"), mask)
+        for out, kernel in kernels:
+            saved = mask if rejected or kernel is None else cv2.dilate(mask, kernel)
+            cv2.imwrite(str(out / f"{path.name}.png"), saved)
 
     return {
         "total": len(paths),
