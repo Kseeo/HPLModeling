@@ -145,6 +145,12 @@ def main(argv: list[str] | None = None) -> int:
              "관측 부족 크레이터 완화 효과 실측 확인, 발가락 사이 등 디테일도 함께 "
              "뭉개지는 트레이드오프는 감수하기로 결정됨.",
     )
+    parser.add_argument(
+        "--keep-intermediates", action="store_true",
+        help="완료 후 --workdir 안의 중간 산출물(프레임/마스크/DB/sparse 복원/dense "
+             "스크래치)을 지우지 않고 그대로 둔다. 기본은 끔(정리) — --out 파일 하나만 "
+             "남는다. run_dense_pipeline.py로 dense 파라미터를 따로 다시 튜닝하려면 켤 것.",
+    )
     args = parser.parse_args(argv)
 
     result = run_pipeline(
@@ -176,6 +182,7 @@ def main(argv: list[str] | None = None) -> int:
         refine_decimate=args.refine_decimate,
         refine_regularity_weight=args.refine_regularity_weight,
         smooth_high_curvature=args.smooth_high_curvature,
+        keep_intermediates=args.keep_intermediates,
     )
 
     print("\n[파이프라인 요약]")
