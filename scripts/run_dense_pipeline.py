@@ -13,13 +13,20 @@ smooth=0 등)는 `dense.py` 모듈 docstring 참고.
 `OPENMVS_BIN_DIR` 환경변수를 그 실행파일들이 있는 폴더로 설정하거나
 `--openmvs-bin`으로 직접 넘길 것. 설치 방법은 README 참고.
 
+이 스크립트로 dense 파라미터만 바꿔 재실행하려면(sparse SfM 재계산 없이),
+1번을 `--keep-intermediates`로 돌려 images/sparse를 남겨둬야 한다 — 기본은
+끝나면 정리됨(`dense.py` docstring 8번 참고).
+
 사용 예::
 
-    # 1) 먼저 sparse SfM + 마스크(dilate=0)를 만들어 둔다
+    # 1) 먼저 sparse SfM까지 (dense 파라미터를 나중에 따로 튜닝할 거라 산출물 보존)
     python scripts/run_sfm_pipeline.py --video data/samples/test02.mp4 `
-        --workdir data/output/sfm_pipeline/test02_run --out data/output/test02_fit.stl
+        --workdir data/output/sfm_pipeline/test02_run --out data/output/test02_fit.stl `
+        --keep-intermediates
 
-    # 2) 그 결과로 dense 메쉬 생성 (RefineMesh 제외, 빠름)
+    이후 #2, 3 중 택 1
+
+    # 2) RefineMesh 제외, dense mesh 생성
     python scripts/run_dense_pipeline.py data/output/sfm_pipeline/test02_run
 
     # 3) 최종 품질까지 원하면 RefineMesh 포함 (느림, 전체 시간의 70%+ 차지)
@@ -29,19 +36,10 @@ smooth=0 등)는 `dense.py` 모듈 docstring 참고.
 from __future__ import annotations
 
 import argparse
-import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "src"))
-
-for _stream_name in ("stdout", "stderr"):
-    _stream = getattr(sys, _stream_name, None)
-    if _stream is not None and hasattr(_stream, "reconfigure"):
-        try:
-            _stream.reconfigure(encoding="utf-8", errors="backslashreplace")
-        except Exception:
-            pass
+import _cli_common  # noqa: F401  -- sys.path 설정 + 콘솔 UTF-8 고정(부작용 import)
+from _dense_cli_args import add_dense_args  # noqa: E402
 
 from foot_engine.sfm.dense import largest_sparse_dir, run_dense_pipeline  # noqa: E402
 
@@ -52,7 +50,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "run_dir", type=Path,
-        help="run_sfm_pipeline.py의 --workdir (images/, masks/, sparse/ 를 포함하는 폴더)",
+        help="run_sfm_pipeline.py의 --workdir (images/, sparse/ 를 포함하는 폴더 — "
+             "그 실행에서 --keep-intermediates를 켰어야 함)",
     )
     parser.add_argument(
         "--sparse-dir", type=Path, default=None,
@@ -61,65 +60,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--masks-dir", type=Path, default=None,
-        help="마스크 폴더(생략 시 <run_dir>/masks_dense를 dilate=0으로 새로 생성).",
+        help="마스크 폴더(생략 시 <run_dir>/masks_dense 재사용, 없으면 dilate=0으로 새로 생성).",
     )
     parser.add_argument("--out-dir", type=Path, default=None, help="산출물 폴더(기본 <run_dir>/dense_mvs)")
-    parser.add_argument("--openmvs-bin", type=str, default=None, help="OpenMVS 실행파일 폴더(생략 시 OPENMVS_BIN_DIR 환경변수)")
-    parser.add_argument(
-        "--refine", action="store_true",
-        help="RefineMesh(사진 광도일관성 보정)까지 실행. 전체 소요시간의 70%%+ 를 "
-             "차지하는 병목이라(실측) 기본은 끔 — 최종 산출물에만 켤 것.",
-    )
-    parser.add_argument("--no-gapfill", dest="postprocess_dmaps", action="store_const", const=0, default=3,
-                         help="저텍스처 평면 공백 메우기(--postprocess-dmaps)를 끈다.")
-    parser.add_argument("--max-threads", type=int, default=8,
-                         help="DensifyPointCloud 스레드 상한(기본 8) — 원인불명 간헐적 크래시 방지용(실측 근거 dense.py 참고).")
-    parser.add_argument(
-        "--visibility-filter-threshold", type=int, default=None,
-        help="OpenMVS 내장 가시성 필터(--filter-point-cloud) 임계값(음수, 예: -1). "
-             "생략(기본)하면 안 돌림 — dense.py 모듈 docstring 5번 참고, 발바닥 보존은 "
-             "확인됐지만 경계 노이즈 제거 효과는 육안 검증 필요.",
-    )
-    parser.add_argument(
-        "--grazing-filter-min-score", type=float, default=None,
-        help="법선-시선 grazing-angle 필터(filter_grazing_points) 임계값(0~1, 예: 0.3). "
-             "생략(기본)하면 안 돌림 — dense.py의 filter_grazing_points() docstring 참고, "
-             "발바닥 보존은 확인됐지만 경계 노이즈 제거 효과는 육안 검증 필요.",
-    )
-    parser.add_argument(
-        "--reprojection-consistency-min-vote", type=float, default=None,
-        help="전체 카메라 재투영 다수결 필터(filter_by_reprojection_consistency) 임계값(0~1, "
-             "예: 0.6). 생략(기본)하면 안 돌림 — 실측(test03, 배경 오염): 0.6에서 오염 후보 "
-             "44%% 제거/발 오제거 11%%.",
-    )
-    parser.add_argument(
-        "--free-space-support", action="store_true",
-        help="ReconstructMesh --free-space-support 켬 — 실측 확인: 메쉬가 뾰족하게 뒤틀리는 "
-             "부작용이 있어 권장 안 함(dense_mvs_results/README.md 참고).",
-    )
-    parser.add_argument("--thickness-factor", type=float, default=1.0,
-                         help="ReconstructMesh --thickness-factor(기본 1.0=OpenMVS 기본값). "
-                              "실측 확인: 2.0에서도 위 free-space-support와 같은 부작용 발생.")
-    parser.add_argument("--quality-factor", type=float, default=1.0,
-                         help="ReconstructMesh --quality-factor(기본 1.0=OpenMVS 기본값).")
-    parser.add_argument("--refine-decimate", type=float, default=1.0,
-                         help="RefineMesh --decimate(0~1, 기본 1=단순화 끔·해상도 보존). "
-                              "`--refine` 켰을 때만 적용.")
-    parser.add_argument("--refine-regularity-weight", type=float, default=None,
-                         help="RefineMesh --regularity-weight(생략 시 OpenMVS 기본값 0.2). "
-                              "`--refine` 켰을 때만 적용.")
-    parser.add_argument(
-        "--no-smooth-high-curvature", dest="smooth_high_curvature", action="store_false",
-        help="고곡률 국소 스무딩(smooth_high_curvature_regions)을 끈다. 기본 켜짐 — "
-             "관측 부족 크레이터 완화 효과 실측 확인, 발가락 사이 등 디테일도 함께 "
-             "뭉개지는 트레이드오프는 감수하기로 결정됨.",
-    )
-    parser.add_argument(
-        "--keep-intermediates", action="store_true",
-        help="완료 후 undistort 워크스페이스/depth map/OpenMVS 로그 등 중간 산출물을 "
-             "지우지 않고 그대로 둔다. 기본은 끔(정리) — <out-dir>/mesh.ply 하나만 남는다. "
-             "디버깅/로깅 목적일 때만 켤 것.",
-    )
+    add_dense_args(parser)  # --openmvs-bin, --refine, --max-threads 등 (dense.py와 공유)
     args = parser.parse_args(argv)
 
     run_dir: Path = args.run_dir
@@ -128,10 +72,15 @@ def main(argv: list[str] | None = None) -> int:
 
     masks_dir = args.masks_dir
     if masks_dir is None:
-        from foot_engine.sfm.masking import generate_masks
         masks_dir = run_dir / "masks_dense"
-        stats = generate_masks(run_dir / "images", masks_dir, dilate=0)
-        print(f"[dense] 마스크(dilate=0) 새로 생성: {stats}")
+        if masks_dir.is_dir() and any(masks_dir.iterdir()):
+            # run_sfm_pipeline.py --keep-intermediates로 이미 만들어 둔 걸 재사용.
+            # rembg/피부 정제 추론은 비싸서 있는 걸 또 돌리지 않는다.
+            print(f"[dense] 기존 마스크 재사용: {masks_dir}")
+        else:
+            from foot_engine.sfm.masking import generate_masks
+            stats = generate_masks(run_dir / "images", masks_dir, dilate=0)
+            print(f"[dense] 마스크(dilate=0) 새로 생성: {stats}")
 
     out_dir = args.out_dir or (run_dir / "dense_mvs")
     mesh_path = run_dense_pipeline(

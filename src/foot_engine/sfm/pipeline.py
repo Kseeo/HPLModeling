@@ -1,12 +1,13 @@
 """사진/영상 한 벌 -> dense MVS 발 메쉬. 앞선 모듈들을 한 번에 엮는 오케스트레이션.
 
-    frame_quality.assess_frames()   — SfM 전 프레임별 절대기준 QC
-        └─ reconstruction.run_sparse_sfm()
-              └─ masking.generate_masks()  — 여기서 발 미검출 프레임을 추가로 제외
-                    └─ cleaning.clean_point_cloud()  — QA용 sparse 정리(최종 메쉬엔 안 씀)
-                    └─ masking.generate_masks(dilate=0)  — dense 전용 마스크
-                          └─ dense.run_dense_pipeline()  — OpenMVS densify + 메싱 + 파편 제거
-                                └─ (선택) 스케일 보정 — geometry.measured_length() 기준
+    frame_quality.assess_frames()  — SfM 전 프레임별 절대기준 QC
+        └─ masking.generate_masks()  — sparse용(dilate=15)+dense용(dilate=0)
+              마스크를 한 번에 생성(추론 중복 방지, extra_dilations 참고).
+              발 미검출 프레임을 여기서 추가로 제외.
+                └─ reconstruction.run_sparse_sfm()
+                      └─ cleaning.clean_point_cloud()  — QA용 sparse 정리(최종 메쉬엔 안 씀)
+                      └─ dense.run_dense_pipeline()  — OpenMVS densify + 메싱 + 파편 제거
+                            └─ (선택) 스케일 보정 — geometry.measured_length() 기준
 """
 
 from __future__ import annotations
@@ -180,11 +181,18 @@ def run_pipeline(
             resolved_images_dir, blur_keep_ratio, names=survivors
         )
 
+    # dense용 마스크(dilate=0)도 여기서 같이 만든다 — rembg/피부 정제 추론(비싼
+    # 부분)은 판정에 dilate가 영향을 주지 않으므로 한 번만 돌리고, 팽창 폭만
+    # 다르게 두 벌 저장한다(masking.generate_masks() docstring 참고). 예전에는
+    # SfM 이후 dense_masks_dir을 위해 같은 추론을 통째로 다시 돌렸었다.
     masks_dir = workdir / "masks"
+    dense_masks_dir = workdir / "masks_dense"
     mask_stats = masking.generate_masks(
         resolved_images_dir, masks_dir, names=candidate_names,
         dilate=mask_dilate, skin_refine=skin_refine, skin_erode=skin_erode,
+        extra_dilations=[(dense_masks_dir, 0)],
     )
+    dense_mask_stats = mask_stats  # 같은 판정을 공유(위 참고) -- 별도로 다시 돌리지 않음
     print(
         f"[마스크] {mask_stats['total']}장 처리 "
         f"(피부 정제 적용 {mask_stats['refined']}장, 제외 {mask_stats['rejected']}장 "
@@ -225,14 +233,6 @@ def run_pipeline(
     cleaned_points_path = workdir / "cleaned_points.ply"
     cleaned_points_path.parent.mkdir(parents=True, exist_ok=True)
     trimesh.PointCloud(cleaned_points).export(cleaned_points_path)
-
-    # dense masking은 sparse용(mask_dilate, 기본 15)과 별도로 dilate=0이 필요하다
-    # (`dense.py` docstring 2번 참고 — 팽창 여유가 dense에서는 배경 누출로 직결).
-    dense_masks_dir = workdir / "masks_dense"
-    dense_mask_stats = masking.generate_masks(
-        resolved_images_dir, dense_masks_dir, names=candidate_names,
-        dilate=0, skin_refine=skin_refine, skin_erode=skin_erode,
-    )
 
     sparse_dir = dense.largest_sparse_dir(workdir / "sparse")
     dense_workdir = workdir / "dense_mvs"

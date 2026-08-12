@@ -1,13 +1,14 @@
 """SfM(Structure-from-Motion) 기반 2D 사진/영상 -> dense MVS 3D 발 메쉬 파이프라인.
 
-외부 포토그래메트리(VRIN)를 대체하는 in-house 경로다. 5단계로 구성된다.
+외부 포토그래메트리(VRIN)를 대체하는 in-house 경로다. `pipeline.run_pipeline()`이
+아래를 이 순서로 엮는 최상위 진입점이다:
 
-    frame_quality.assess_frames()     — SfM 전, 프레임별 절대기준 QC(파일 손상/해상도/노출)
-        └─ reconstruction.run_sparse_sfm()  — 사진/영상 -> 카메라 포즈 + sparse 포인트클라우드
-              └─ masking.generate_masks()   — 사진별 발/피부 마스크, 프레임 필터링
-                    └─ cleaning.clean_point_cloud()  — 마스크 기반 배경 제거 + 이상치 제거 + 군집화(QA용, 최종 메쉬엔 안 씀)
-                          └─ dense.run_dense_pipeline()  — OpenMVS densify + 메싱 + 파편 제거
-                                └─ pipeline.run_pipeline()  — 위 전부를 한 번에 엮는 오케스트레이션
+    frame_quality.assess_frames()  — SfM 전, 프레임별 절대기준 QC(파일 손상/해상도/노출)
+        └─ masking.generate_masks()  — 사진별 발/피부 마스크(sparse+dense 두 벌을
+              한 번에 생성 — extra_dilations, 추론 중복 방지), 프레임 필터링
+                └─ reconstruction.run_sparse_sfm()  — 카메라 포즈 + sparse 포인트클라우드
+                      └─ cleaning.clean_point_cloud()  — 마스크 기반 배경 제거 + 이상치 제거 + 군집화(QA용, 최종 메쉬엔 안 씀)
+                      └─ dense.run_dense_pipeline()  — OpenMVS densify + 메싱 + 파편 제거
 
 메쉬 생성기는 dense MVS 하나다(2026-08-11, 템플릿 워프/SSM 경로는
 `archive/deformer_ssm_pipeline/`로 옮김 — 대응점 노이즈로 SSM이 무산된 뒤
