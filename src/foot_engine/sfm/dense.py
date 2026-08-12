@@ -7,7 +7,7 @@ CPU 빌드로 동작합니다.
 
 파이프라인 흐름:
     undistort_for_dense() -> convert_masks_for_openmvs() -> run_interface_colmap()
-    -> run_densify_point_cloud() -> clean_dense_point_cloud()
+    -> run_densify_point_cloud() -> clean_dense_point_cloud() (선택: prune_protrusions)
     -> (선택) filter_by_reprojection_consistency() -> (선택) filter_grazing_points()
     -> (선택) filter_point_cloud_visibility() -> restore_point_cloud_views()
     -> run_reconstruct_mesh() -> run_refine_mesh() (선택) -> keep_largest_component()
@@ -51,6 +51,14 @@ CPU 빌드로 동작합니다.
    완화(곡률 상위만 대상)와는 별개이며, 크레이터 자체는 이 방식으로도
    못 없앤다는 원리적 한계가 그대로 적용됩니다(이웃들의 이차곡면 추세
    자체가 왜곡돼 있어서). 둘 다 폴리곤(정점/면) 개수는 그대로입니다.
+10. `clean_dense_point_cloud(prune_protrusions=True)`(기본 꺼짐)는 뒤꿈치
+    뿔 결함을 겨냥한 대책이지만, 판정이 그 실행의 점군 분포에 대한
+    **상대적** 기준(밀도 중앙값 대비 비율, 거리 percentile)이라 SfM/MVS
+    재구성 자체의 실행 간 편차만으로 얼마나 지워지는지가 크게 흔들린다
+    (실측: test03 동일 영상 재실행 두 번에서 3.3% vs 18.8% 제거 -- 후자는
+    진짜 표면까지 지워 디테일이 뭉개짐). `max_protrusion_ratio`(기본 8%)
+    안전장치로 폭주 시 이번 실행은 통째로 건너뛰지만, 근본적으로 실행마다
+    결과가 달라질 수 있다는 뜻이라 기본값을 켜는 건 아직 시기상조.
 
 알려진 한계:
 - 발바닥 미촬영 프로토콜 특성상 접지면에 큰 구멍(30%대)이 남습니다.
@@ -425,6 +433,7 @@ def clean_dense_point_cloud(
     k: int = 8,
     std_ratio: float = 2.0,
     prune_protrusions: bool = False,
+    max_protrusion_ratio: float = 0.08,
 ) -> tuple[int, int]:
     """dense 포인트클라우드에서 통계적 이상치를 제거한다 (DBSCAN 사용 안 함).
 
@@ -434,6 +443,19 @@ def clean_dense_point_cloud(
     Args:
         prune_protrusions: 위 경고 참고. 켜려면 `density_ratio`/`far_percentile`을
             대상 점군 규모에서 직접 검증한 뒤 켤 것 -- 기본은 꺼짐.
+            `_protrusion_remove_mask()`의 "얇음"/"멀음" 판정이 그 점군
+            자체의 상대적 분포 기준이라, SfM/MVS 재구성의 실행 간 편차
+            (같은 영상도 매번 점 수/밀도 분포가 조금씩 다름 -- 멀티스레드
+            스테레오 매칭이 원인)만으로 얼마나 지워지는지가 실측으로 확
+            연히 갈렸다: test03 동일 영상 재실행 두 번에서 각각 3.3%
+            (6,434점, 뒤꿈치 뿔 결함 완화 확인)와 18.8%(34,833점, 진짜
+            표면까지 대거 삭제돼 디테일이 뭉개짐)가 나왔다. 아래
+            `max_protrusion_ratio` 안전장치로 후자 같은 폭주를 막는다.
+        max_protrusion_ratio: `prune_protrusions`가 이 비율보다 많은 점을
+            지우려 하면 실행 간 편차로 판정 기준 자체가 흔들린 것으로
+            보고 이번 실행에서는 통째로 건너뛴다(`cleaning.py`의
+            `max_plane_ratio`와 같은 패턴 -- 임계값이 잘못 커져 피사체까지
+            잘라내는 사고를 막는 안전장치).
 
     Returns:
         (원본 점 개수, 정리 후 점 개수).
@@ -453,7 +475,13 @@ def clean_dense_point_cloud(
             density_radius_nn_mult=4.0, far_percentile=97.0, density_ratio=0.6,
         )
         n_protrusion = int(protrusion_mask_subset.sum())
-        if n_protrusion:
+        if n_protrusion > stat_kept_n * max_protrusion_ratio:
+            print(
+                f"[dense] 뿔/스파이크 판정이 점 {n_protrusion:,}개"
+                f"({n_protrusion/stat_kept_n:.1%})를 지우려 함 -- "
+                f"안전장치(max_protrusion_ratio={max_protrusion_ratio:.0%}) 초과로 이번엔 건너뜀"
+            )
+        elif n_protrusion:
             inlier_idx = np.where(inliers)[0]
             inliers[inlier_idx[protrusion_mask_subset]] = False
             print(f"[dense] 뿔/스파이크 제거: 점 {n_protrusion:,}개")
@@ -1141,6 +1169,7 @@ def run_dense_pipeline(
     smooth_high_curvature: bool = True,
     fill_holes: bool = False,
     sand_surface_enabled: bool = False,
+    prune_protrusions: bool = False,
     keep_intermediates: bool = False,
 ) -> Path:
     """위 단계 전부를 엮는 오케스트레이션. 최종 메쉬 경로를 반환한다.
@@ -1187,6 +1216,11 @@ def run_dense_pipeline(
             `smooth_high_curvature`(크레이터 전용, 곡률 상위만)와 달리
             발 전체에 균일하게 적용되는 일반 노이즈 완화 단계다
             (`sand_surface()` docstring 참고). 폴리곤 수는 그대로다.
+        prune_protrusions: `clean_dense_point_cloud(prune_protrusions=True)`로
+            전달 -- 포인트클라우드 단계(메싱 전)에서 국소 밀도 기준으로
+            뿔/스파이크 후보 점을 미리 제거한다. 발목 부근 뿔 결함(알려진
+            한계, 모듈 docstring 참고)을 겨냥한 대책이지만 기본 False --
+            아직 실측 검증 전.
         keep_intermediates: `False`(기본)이면 완료 후 `workdir` 안의 모든
             중간 산출물(undistort 워크스페이스, depth map, OpenMVS 로그,
             RefineMesh 반복 단계 메쉬 등)을 지우고 `<workdir>/mesh.ply`
@@ -1211,7 +1245,7 @@ def run_dense_pipeline(
         max_threads=max_threads, postprocess_dmaps=postprocess_dmaps,
     )
     cleaned_ply = openmvs_dir / "scene_dense_cleaned.ply"
-    clean_dense_point_cloud(dense_ply, cleaned_ply)
+    clean_dense_point_cloud(dense_ply, cleaned_ply, prune_protrusions=prune_protrusions)
 
     mesh_input_ply = cleaned_ply
     if reprojection_consistency_min_vote is not None:
