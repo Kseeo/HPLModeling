@@ -94,6 +94,19 @@ def add_dense_args(
              "뭉개지는 트레이드오프는 감수하기로 결정됨.",
     )
     parser.add_argument(
+        "--fill-holes", action="store_true",
+        help="작은 구멍(핀홀)만 크기 필터로 골라 팬 삼각분할로 메운다(fill_small_holes). "
+             "발바닥 등 큰 구멍은 그대로 둔다. 기본 꺼짐 — 아직 실측 검증 전. "
+             "폴리곤은 추가만 되고 기존 정점/면은 그대로다.",
+    )
+    parser.add_argument(
+        "--sand-surface", dest="sand_surface_enabled", action="store_true",
+        help="전체 정점을 국소 이차곡면(quadric)에 투영해 다듬는다(sand_surface) — "
+             "곡률 임계값 없이 발 전체에 균일 적용, --no-smooth-high-curvature와 달리 "
+             "크레이터 전용이 아닌 일반 노이즈 완화. 기본 꺼짐 — 아직 실측 검증 전. "
+             "정점/면 개수는 그대로다.",
+    )
+    parser.add_argument(
         "--keep-intermediates", action="store_true",
         help="완료 후 중간 산출물을 지우지 않고 그대로 둔다(이 스크립트가 만든 범위 — "
              "run_dense_pipeline.py는 undistort 워크스페이스/depth map/OpenMVS 로그, "

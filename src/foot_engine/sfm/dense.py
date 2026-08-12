@@ -11,7 +11,7 @@ CPU 빌드로 동작합니다.
     -> (선택) filter_by_reprojection_consistency() -> (선택) filter_grazing_points()
     -> (선택) filter_point_cloud_visibility() -> restore_point_cloud_views()
     -> run_reconstruct_mesh() -> run_refine_mesh() (선택) -> keep_largest_component()
-    -> smooth_high_curvature_regions() (기본 켜짐)
+    -> (선택) fill_small_holes() -> (선택) sand_surface() -> smooth_high_curvature_regions() (기본 켜짐)
 
 주요 실측 결과 및 구현 규칙:
 1. 마스크 처리: 배경 누출 방지를 위해 densify 이전에 마스크를 적용하며, dilate=0으로 설정합니다.
@@ -44,6 +44,13 @@ CPU 빌드로 동작합니다.
    RefineMesh 반복 단계별 메쉬 등)은 기본적으로 남기지 않습니다 — 완료 시
    `<workdir>/mesh.ply` 하나만 남기고 나머지는 정리합니다. 디버깅/로깅
    목적으로 전부 보존하려면 `keep_intermediates=True`.
+9. 2026-08-12 추가, 둘 다 기본 꺼짐(실측 검증 전): `fill_small_holes()`는
+   작은 구멍(핀홀)만 크기 필터로 골라 메웁니다(발바닥 등 큰 구멍은
+   그대로 둠). `sand_surface()`는 곡률 임계값 없이 전체 정점을 국소
+   이차곡면에 투영해 다듬는 일반 노이즈 완화 단계입니다 -- 7번의 크레이터
+   완화(곡률 상위만 대상)와는 별개이며, 크레이터 자체는 이 방식으로도
+   못 없앤다는 원리적 한계가 그대로 적용됩니다(이웃들의 이차곡면 추세
+   자체가 왜곡돼 있어서). 둘 다 폴리곤(정점/면) 개수는 그대로입니다.
 
 알려진 한계:
 - 발바닥 미촬영 프로토콜 특성상 접지면에 큰 구멍(30%대)이 남습니다.
@@ -736,6 +743,203 @@ def keep_largest_component(mesh: trimesh.Trimesh) -> tuple[trimesh.Trimesh, int,
     return largest, total_faces, len(largest.faces)
 
 
+def fill_small_holes(
+    mesh: trimesh.Trimesh,
+    *,
+    max_hole_diameter_ratio: float = 0.05,
+    use_fan: bool = True,
+) -> tuple[trimesh.Trimesh, int]:
+    """작은 구멍(핀홀/관측 누락 조각)만 팬 삼각분할로 메운다.
+
+    발바닥처럼 원래 안 찍은 큰 구멍은 일부러 그대로 둔다 -- 억지로 메우면
+    평평한 가짜 뚜껑이 씌워져 실제 형태를 왜곡한다(알려진 한계, 모듈
+    docstring 참고). 구멍 하나의 바운딩박스 대각선이 메쉬 전체 대각선의
+    `max_hole_diameter_ratio`보다 작을 때만 메운다.
+
+    삼각형은 추가만 되고(폴리곤 감소 없음) 기존 정점/면은 그대로 둔다.
+    `trimesh.repair.fill_holes()`와 같은 방식(경계 사이클 탐색 + 팬
+    삼각분할)이지만 크기 필터가 없는 그 함수와 달리 큰 구멍은 건너뛴다.
+
+    Args:
+        max_hole_diameter_ratio: 구멍 자체 바운딩박스 대각선 / 메쉬 전체
+            바운딩박스 대각선 비율 상한(기본 0.05 = 5%).
+        use_fan: 볼록하지 않은 구멍도 팬 삼각분할로 메울지.
+
+    Returns:
+        (구멍 메운 메쉬, 실제로 메운 구멍 개수).
+    """
+    if len(mesh.faces) < 3 or mesh.is_watertight:
+        return mesh, 0
+
+    boundary_groups = trimesh.grouping.group_rows(mesh.edges_sorted, require_count=1)
+    if len(boundary_groups) < 3:
+        return mesh, 0
+
+    boundary = mesh.edges[boundary_groups]
+    holes = nx.cycle_basis(nx.from_edgelist(boundary))
+    if not holes:
+        return mesh, 0
+
+    mesh_diag = float(np.linalg.norm(mesh.bounds[1] - mesh.bounds[0]))
+    max_diag = mesh_diag * max_hole_diameter_ratio
+    small_holes = []
+    for loop in holes:
+        pts = mesh.vertices[loop]
+        diag = float(np.linalg.norm(pts.max(axis=0) - pts.min(axis=0)))
+        if diag <= max_diag:
+            small_holes.append(loop)
+    if not small_holes:
+        return mesh, 0
+
+    new_faces = trimesh.geometry.triangulate_quads(small_holes, use_fan=use_fan)
+    if len(new_faces) == 0:
+        return mesh, 0
+
+    # trimesh.repair.fill_holes()와 같은 winding 보정 -- 새 face의 경계
+    # edge가 기존 경계와 같은 방향이면 뒤집는다(반대 방향이어야 정상).
+    new_edges = trimesh.geometry.faces_to_edges(new_faces)
+    hashable_new = trimesh.grouping.hashable_rows(new_edges)
+    hashable_old = trimesh.grouping.hashable_rows(boundary)
+    needs_reverse = np.isin(hashable_new, hashable_old).reshape((-1, 3)).any(axis=1)
+    new_faces[needs_reverse] = np.fliplr(new_faces[needs_reverse])
+
+    out = mesh.copy()
+    out.extend_faces(new_faces)
+    return out, len(small_holes)
+
+
+def _ring_neighbors_padded(
+    adjacency: list, *, min_neighbors: int, max_neighbors: int
+) -> tuple[np.ndarray, np.ndarray]:
+    """위상 인접(1-ring)을 BFS로 확장해 정점별 이웃 최소 개수를 채운다.
+
+    공간(유클리드) 최근접이 아니라 메쉬 표면을 따라간 위상 인접을 쓴다 --
+    발처럼 접힌/오목한 형태에서는 공간적으로 가까워도 표면상으로는 먼 두
+    지점(예: 발목 반대쪽, 발가락 사이)이 유클리드 최근접 이웃으로 섞여
+    들어가 국소 곡면 피팅을 망가뜨리는 것을 실측으로 확인했다(사포질을
+    실제 발 메쉬에 적용하니 곡률이 줄기는커녕 오히려 늘어남 -- 공간
+    최근접 방식으로는 원리적으로 못 피함, k-ring으로 전환 후 해결).
+
+    Returns:
+        (idx_padded, mask) -- 둘 다 (n, max_neighbors) 모양. `mask`가
+        False인 자리의 `idx_padded` 값은 의미 없다(0으로 채워짐).
+    """
+    n = len(adjacency)
+    idx_padded = np.zeros((n, max_neighbors), dtype=np.int64)
+    mask = np.zeros((n, max_neighbors), dtype=bool)
+    for i in range(n):
+        visited = {i}
+        frontier = {i}
+        neighbors: set[int] = set()
+        while len(neighbors) < min_neighbors and frontier:
+            next_frontier = {nb for node in frontier for nb in adjacency[node] if nb not in visited}
+            visited |= next_frontier
+            neighbors |= next_frontier
+            frontier = next_frontier
+        chosen = np.fromiter(neighbors, dtype=np.int64, count=len(neighbors))[:max_neighbors]
+        idx_padded[i, : len(chosen)] = chosen
+        mask[i, : len(chosen)] = True
+    return idx_padded, mask
+
+
+def sand_surface(
+    mesh: trimesh.Trimesh,
+    *,
+    min_neighbors: int = 16,
+    max_neighbors: int = 32,
+    iterations: int = 3,
+    regularization: float = 1e-6,
+    max_offset_ratio: float = 1.0,
+) -> trimesh.Trimesh:
+    """모든 정점을 국소 이차곡면(quadric) 근사에 투영해 다듬는다("사포질").
+
+    각 정점 주변 위상(표면) 인접을 BFS로 확장해 최소 `min_neighbors`개를
+    모은 뒤, 그 이웃들로 국소 접평면(PCA)을 구하고 접평면 좌표계에서 2차
+    곡면 `h = a*u^2+b*uv+c*v^2+d*u+e*v+f`를 최소제곱으로 피팅해, 그 정점을
+    이웃들의 추세가 예측하는 위치(`f`, 법선 방향 오프셋)로 옮긴다. 이웃
+    평균으로 등방적으로 당기는 라플라시안(`smooth_high_curvature_regions()`)과
+    달리 법선 방향으로만 움직이므로 접평면 방향의 진짜 형태(2차 항으로
+    표현되는 국소 굴곡)는 보존하면서 그 정점만 튀는 고주파 노이즈를 깎아낸다.
+
+    `smooth_high_curvature_regions()`와 달리 곡률 임계값으로 일부만 고르지
+    않고 전체 정점에 균일하게 적용한다 -- 발 전체를 다듬는 일반 노이즈
+    완화용이며, 정점/면 개수·위상은 그대로다(폴리곤 감소 없음).
+
+    구현 노트(둘 다 실측으로 확인된 안전장치):
+    - 이웃은 공간(유클리드) 최근접이 아니라 위상(표면) 인접이다 --
+      `_ring_neighbors_padded()` docstring 참고, 공간 최근접은 접힌 형태
+      에서 표면상 먼 지점을 섞어 오히려 곡률을 늘렸다.
+    - 이웃 좌표(u, w)는 피팅 전에 국소 이웃 거리 스케일로 정규화한다 --
+      정규화 없이는 좌표 스케일에 따라 정규방정식(AᵀA) 조건수가 나빠져
+      일부 정점의 피팅이 극단값으로 튐(합성 구 테스트: 정규화 전 3회
+      반복 후 최대 오프셋이 반경의 180배로 발산). 그래도 남는 이상치에
+      대비해 `max_offset_ratio`로 오프셋을 국소 스케일의 배수로 clamp한다.
+
+    한계: 관측 부족으로 생긴 오목 부위(아치/뒤꿈치) 크레이터처럼 이웃
+    전체가 같은 방향으로 치우친 "매끄러운" 저주파 왜곡은 이웃들의 이차곡면
+    추세 자체가 이미 왜곡돼 있어 이 방식으로도 못 없앤다(실측 확인,
+    `dense_mvs_results/README.md` "국소 이차곡면 피팅 시도" 절 참고) --
+    크레이터 완화는 여전히 `smooth_high_curvature_regions()` 몫이고, 이
+    함수는 그것과 별개로 전반적인 표면 노이즈를 줄이는 보완 단계다.
+
+    Args:
+        min_neighbors: 국소 곡면 피팅에 쓸 최소 이웃 수 -- 이차곡면
+            미지수(6개)보다 충분히 많아야 안정적이다. 1-ring으로 부족하면
+            2-ring, 3-ring... 순으로 확장한다.
+        max_neighbors: 이웃이 이보다 많아지면 자른다(배열 패딩 크기 상한).
+        iterations: 반복 횟수. 이웃 집합(위상 기준이라 메쉬가 안 변하는 한
+            고정)은 한 번만 계산하고, 매 반복 그 이웃들의 현재 위치로
+            다시 피팅한다.
+        regularization: 정규방정식(AᵀA, 정규화된 u/w 기준이라 대각 성분이
+            대략 O(min_neighbors) 스케일)에 더하는 상대적 대각 성분.
+        max_offset_ratio: 오프셋 크기를 국소 이웃 평균 거리의 이 배수로
+            제한하는 안전장치(기본 1.0).
+    """
+    n = len(mesh.vertices)
+    if n < max(min_neighbors, 6) + 1:
+        return mesh  # 정점이 너무 적어 이차곡면을 안정적으로 못 피팅함
+
+    idx, mask = _ring_neighbors_padded(
+        mesh.vertex_neighbors, min_neighbors=min_neighbors, max_neighbors=max_neighbors
+    )
+    valid = mask.sum(axis=1) >= 6  # 이차곡면 미지수(6개) 미만이면 그 정점은 안 건드림
+    maskf = mask.astype(np.float64)
+
+    v = mesh.vertices.copy().astype(np.float64)
+    for _ in range(iterations):
+        rel = (v[idx] - v[:, None, :]) * maskf[:, :, None]  # (n, K, 3) -- 패딩은 0으로 무효화
+        cov = np.einsum("nki,nkj->nij", rel, rel)
+        evals, evecs = np.linalg.eigh(cov)  # 오름차순: 0=법선, 1/2=접평면
+        normal = evecs[:, :, 0]
+        u_axis, v_axis = evecs[:, :, 2], evecs[:, :, 1]
+
+        dist = np.linalg.norm(rel, axis=2)
+        scale = np.where(valid, dist.sum(axis=1) / np.maximum(mask.sum(axis=1), 1), 1.0)
+        scale = np.maximum(scale, 1e-9)
+
+        # u/w를 국소 스케일로 정규화 -- 상수항(f)은 (u,w)=(0,0)에서의 값이라
+        # 스케일 무관, 그대로 실제 법선 방향 오프셋(길이 단위)이다.
+        u = (np.einsum("nki,ni->nk", rel, u_axis) / scale[:, None]) * maskf
+        w = (np.einsum("nki,ni->nk", rel, v_axis) / scale[:, None]) * maskf
+        h = np.einsum("nki,ni->nk", rel, normal) * maskf
+
+        design = np.stack([u * u, u * w, w * w, u, w, maskf], axis=-1)  # (n,K,6) -- 패딩 행은 전부 0
+        AtA = np.einsum("nki,nkj->nij", design, design)
+        AtA += regularization * min_neighbors * np.eye(6)
+        Ath = np.einsum("nki,nk->ni", design, h)
+        coeffs = np.linalg.solve(AtA, Ath[..., None])[..., 0]  # (n, 6)
+
+        offset = np.where(valid, coeffs[:, 5], 0.0)  # 이차곡면이 예측하는 (0,0) 지점의 높이
+        max_offset = max_offset_ratio * scale
+        offset = np.clip(offset, -max_offset, max_offset)
+        v = v + offset[:, None] * normal
+
+    out = mesh.copy()
+    out.vertices = v
+    print(f"[dense] 사포질(전체 이차곡면 투영): 정점 {n:,}개, {iterations}회 반복")
+    return out
+
+
 def smooth_high_curvature_regions(
     mesh: trimesh.Trimesh,
     *,
@@ -935,6 +1139,8 @@ def run_dense_pipeline(
     refine_decimate: float = 1.0,
     refine_regularity_weight: float | None = None,
     smooth_high_curvature: bool = True,
+    fill_holes: bool = False,
+    sand_surface_enabled: bool = False,
     keep_intermediates: bool = False,
 ) -> Path:
     """위 단계 전부를 엮는 오케스트레이션. 최종 메쉬 경로를 반환한다.
@@ -973,6 +1179,14 @@ def run_dense_pipeline(
             기본 True -- 관측 부족 크레이터 완화 효과 실측 확인, 발가락
             사이 등 진짜 디테일도 함께 뭉개지는 트레이드오프는 감수하기로
             결정됨(`dense_mvs_results/README.md` 참고).
+        fill_holes: `fill_small_holes()`를 돌려 작은 구멍(핀홀)만 메울지.
+            기본 False -- 아직 실측 검증 전. 발바닥 등 큰 구멍은 크기
+            필터로 건드리지 않는다(`fill_small_holes()` docstring 참고).
+        sand_surface_enabled: `sand_surface()`를 돌려 전체 정점을 국소
+            이차곡면에 투영해 다듬을지. 기본 False -- 아직 실측 검증 전.
+            `smooth_high_curvature`(크레이터 전용, 곡률 상위만)와 달리
+            발 전체에 균일하게 적용되는 일반 노이즈 완화 단계다
+            (`sand_surface()` docstring 참고). 폴리곤 수는 그대로다.
         keep_intermediates: `False`(기본)이면 완료 후 `workdir` 안의 모든
             중간 산출물(undistort 워크스페이스, depth map, OpenMVS 로그,
             RefineMesh 반복 단계 메쉬 등)을 지우고 `<workdir>/mesh.ply`
@@ -1045,6 +1259,16 @@ def run_dense_pipeline(
     changed = faces_after < faces_before
     if changed:
         print(f"[dense] 부유 파편 제거: {faces_before:,} -> {faces_after:,} faces")
+
+    if fill_holes:
+        mesh, n_filled = fill_small_holes(mesh)
+        if n_filled:
+            print(f"[dense] 작은 구멍 메움: {n_filled}개")
+            changed = True
+
+    if sand_surface_enabled:
+        mesh = sand_surface(mesh)
+        changed = True
 
     if smooth_high_curvature:
         mesh = smooth_high_curvature_regions(mesh)
