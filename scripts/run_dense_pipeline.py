@@ -114,6 +114,12 @@ def main(argv: list[str] | None = None) -> int:
              "관측 부족 크레이터 완화 효과 실측 확인, 발가락 사이 등 디테일도 함께 "
              "뭉개지는 트레이드오프는 감수하기로 결정됨.",
     )
+    parser.add_argument(
+        "--keep-intermediates", action="store_true",
+        help="완료 후 undistort 워크스페이스/depth map/OpenMVS 로그 등 중간 산출물을 "
+             "지우지 않고 그대로 둔다. 기본은 끔(정리) — <out-dir>/mesh.ply 하나만 남는다. "
+             "디버깅/로깅 목적일 때만 켤 것.",
+    )
     args = parser.parse_args(argv)
 
     run_dir: Path = args.run_dir
@@ -146,6 +152,7 @@ def main(argv: list[str] | None = None) -> int:
         refine_decimate=args.refine_decimate,
         refine_regularity_weight=args.refine_regularity_weight,
         smooth_high_curvature=args.smooth_high_curvature,
+        keep_intermediates=args.keep_intermediates,
     )
     print(f"\n최종 메쉬: {mesh_path}")
     return 0

@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -88,6 +89,7 @@ def run_pipeline(
     refine_decimate: float = 1.0,
     refine_regularity_weight: float | None = None,
     smooth_high_curvature: bool = True,
+    keep_intermediates: bool = False,
 ) -> PipelineResult:
     """영상/사진 -> 발/피부 마스크 -> sparse SfM -> dense MVS -> 스케일 보정 메쉬.
 
@@ -127,6 +129,12 @@ def run_pipeline(
             촬영본에서도 안전한지 아직 test03 1건만 검증됨. free_space_support/
             thickness_factor는 실측에서 부작용(메쉬 뒤틀림)만 확인돼 기본값
             (꺼짐/1.0)을 건드리지 말 것.
+        keep_intermediates: `False`(기본)이면 성공 후 `workdir` 안의 모든
+            중간 산출물(추출 프레임, 마스크, DB, sparse 재구성, QA용 sparse
+            점군, dense MVS 스크래치)을 지운다 — 남는 건 `out_mesh` 하나뿐.
+            `run_dense_pipeline.py`로 dense 파라미터만 다시 튜닝하려면
+            이 폴더의 `images/`/`masks_dense/`/`sparse/`가 남아있어야 하므로
+            `True`로 켤 것.
 
     Returns:
         산출물 경로와 요약 통계를 담은 `PipelineResult`.
@@ -239,6 +247,7 @@ def run_pipeline(
         quality_factor=quality_factor, refine_decimate=refine_decimate,
         refine_regularity_weight=refine_regularity_weight,
         smooth_high_curvature=smooth_high_curvature,
+        keep_intermediates=keep_intermediates,
     )
 
     # 부유 파편 제거(keep_largest_component)는 dense.run_dense_pipeline() 안에서
@@ -271,6 +280,23 @@ def run_pipeline(
     out_mesh.parent.mkdir(parents=True, exist_ok=True)
     mesh.export(out_mesh)
     print(f"\n저장: {out_mesh} (정점 {len(mesh.vertices):,}개, 면 {len(mesh.faces):,}개)")
+
+    if not keep_intermediates:
+        # out_mesh(위에서 이미 저장됨)만 남기고 workdir 스크래치는 전부 지운다.
+        # video로 받은 프레임(workdir/images)만 지우고, images_dir로 사용자가
+        # 직접 넘긴 외부 폴더는 우리 소유가 아니므로 건드리지 않는다.
+        cleanup_targets = [
+            workdir / "database.db", workdir / "sparse", masks_dir, dense_masks_dir,
+            sparse_points_path, cleaned_points_path, dense_workdir,
+        ]
+        if video is not None:
+            cleanup_targets.append(resolved_images_dir)
+        for target in cleanup_targets:
+            if target.is_dir():
+                shutil.rmtree(target, ignore_errors=True)
+            elif target.is_file():
+                target.unlink()
+        print(f"[정리] keep_intermediates=False -- {workdir} 중간 산출물 삭제 (최종 결과는 {out_mesh})")
 
     return PipelineResult(
         images_dir=resolved_images_dir,

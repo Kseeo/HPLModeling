@@ -40,6 +40,10 @@ CPU 빌드로 동작합니다.
    켜짐)로 완화합니다 — 노이즈와 진짜 굴곡을 주파수로만 구분해 발가락
    사이 등 디테일도 함께 뭉개지는 트레이드오프가 있습니다(원리적 한계,
    국소 이차곡면 피팅으로도 안 풀림 — 상세 `dense_mvs_results/README.md`).
+8. 중간 산출물(undistort된 COLMAP dense 워크스페이스, depth map 수십~수백MB,
+   RefineMesh 반복 단계별 메쉬 등)은 기본적으로 남기지 않습니다 — 완료 시
+   `<workdir>/mesh.ply` 하나만 남기고 나머지는 정리합니다. 디버깅/로깅
+   목적으로 전부 보존하려면 `keep_intermediates=True`.
 
 알려진 한계:
 - 발바닥 미촬영 프로토콜 특성상 접지면에 큰 구멍(30%대)이 남습니다.
@@ -55,6 +59,7 @@ CPU 빌드로 동작합니다.
 from __future__ import annotations
 
 import os
+import shutil
 import struct
 import subprocess
 from pathlib import Path
@@ -83,10 +88,14 @@ DEFAULT_POSTPROCESS_DMAPS = 3
 
 
 def _resolve_openmvs_bin(openmvs_bin: str | Path | None) -> Path:
-    resolved = Path(openmvs_bin) if openmvs_bin else Path(DEFAULT_OPENMVS_BIN_DIR)
-    if not resolved.is_dir():
+    # Path("").is_dir()는 "."(cwd)로 취급돼 늘 True다 -- 값이 실제로 비어있는지는
+    # Path로 감싸기 전에 문자열로 따로 걸러내야 한다.
+    bin_str = str(openmvs_bin) if openmvs_bin else DEFAULT_OPENMVS_BIN_DIR
+    resolved = Path(bin_str) if bin_str else None
+    if resolved is None or not resolved.is_dir():
+        where = str(resolved) if resolved is not None else "(지정되지 않음)"
         raise FileNotFoundError(
-            f"OpenMVS 실행파일 폴더를 찾을 수 없습니다: {resolved} -- "
+            f"OpenMVS 실행파일 폴더를 찾을 수 없습니다: {where} -- "
             "OPENMVS_BIN_DIR 환경변수를 설정하거나 openmvs_bin 인자로 직접 넘기세요. "
             "설치 방법은 README의 'Dense MVS(선택)' 절 참고."
         )
@@ -926,6 +935,7 @@ def run_dense_pipeline(
     refine_decimate: float = 1.0,
     refine_regularity_weight: float | None = None,
     smooth_high_curvature: bool = True,
+    keep_intermediates: bool = False,
 ) -> Path:
     """위 단계 전부를 엮는 오케스트레이션. 최종 메쉬 경로를 반환한다.
 
@@ -963,6 +973,10 @@ def run_dense_pipeline(
             기본 True -- 관측 부족 크레이터 완화 효과 실측 확인, 발가락
             사이 등 진짜 디테일도 함께 뭉개지는 트레이드오프는 감수하기로
             결정됨(`dense_mvs_results/README.md` 참고).
+        keep_intermediates: `False`(기본)이면 완료 후 `workdir` 안의 모든
+            중간 산출물(undistort 워크스페이스, depth map, OpenMVS 로그,
+            RefineMesh 반복 단계 메쉬 등)을 지우고 `<workdir>/mesh.ply`
+            하나만 남긴다. 디버깅/로깅용으로 전부 보존하려면 `True`.
     """
     # OpenMVS 서브프로세스는 -w(workdir)를 cwd로 실행되므로, 그 외 입력 경로는
     # 전부 절대경로로 넘겨야 한다 -- 상대경로를 그대로 두면 cwd가 바뀐 뒤
@@ -1039,5 +1053,27 @@ def run_dense_pipeline(
     if changed:
         mesh.export(mesh_ply)
 
+    if not keep_intermediates:
+        mesh_ply = _keep_final_mesh_only(mesh_ply, workdir)
+
     print(f"[dense] 완료: {mesh_ply}")
     return mesh_ply
+
+
+def _keep_final_mesh_only(mesh_ply: Path, workdir: Path) -> Path:
+    """`mesh_ply`를 `<workdir>/mesh.ply`로 옮기고 `workdir`의 나머지(undistort
+    워크스페이스, depth map, OpenMVS 로그/중간 씬 파일 등)는 전부 지운다.
+
+    `keep_intermediates=False`(기본)일 때만 호출된다.
+    """
+    final_path = workdir / f"mesh{mesh_ply.suffix}"
+    if mesh_ply.resolve() != final_path.resolve():
+        shutil.copy2(mesh_ply, final_path)
+    for child in workdir.iterdir():
+        if child.resolve() == final_path.resolve():
+            continue
+        if child.is_dir():
+            shutil.rmtree(child, ignore_errors=True)
+        else:
+            child.unlink()
+    return final_path
