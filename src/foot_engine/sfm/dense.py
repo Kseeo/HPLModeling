@@ -101,6 +101,13 @@ DEFAULT_MAX_THREADS = 8
 #: 저텍스처 평면(발등/발바닥)의 깊이 추정 공백을 일부 메운다(실측: 점 13.8%↑).
 DEFAULT_POSTPROCESS_DMAPS = 3
 
+#: `smooth_high_curvature_regions()` 기본 강도 -- 2026-08-12 렌더 비교로
+#: 90/5/10/0.6에서 이 값으로 올림(표면 노이즈 확실히 줄고 실루엣은 유지됨).
+DEFAULT_CURVATURE_PERCENTILE = 60.0
+DEFAULT_CURVATURE_RINGS = 6
+DEFAULT_CURVATURE_ITERATIONS = 15
+DEFAULT_CURVATURE_ALPHA = 0.7
+
 
 def _resolve_openmvs_bin(openmvs_bin: str | Path | None) -> Path:
     # Path("").is_dir()는 "."(cwd)로 취급돼 늘 True다 -- 값이 실제로 비어있는지는
@@ -1167,8 +1174,12 @@ def run_dense_pipeline(
     refine_decimate: float = 1.0,
     refine_regularity_weight: float | None = None,
     smooth_high_curvature: bool = True,
-    fill_holes: bool = False,
-    sand_surface_enabled: bool = False,
+    curvature_percentile: float = DEFAULT_CURVATURE_PERCENTILE,
+    curvature_rings: int = DEFAULT_CURVATURE_RINGS,
+    curvature_iterations: int = DEFAULT_CURVATURE_ITERATIONS,
+    curvature_alpha: float = DEFAULT_CURVATURE_ALPHA,
+    fill_holes: bool = True,
+    sand_surface_enabled: bool = True,
     prune_protrusions: bool = False,
     keep_intermediates: bool = False,
 ) -> Path:
@@ -1205,17 +1216,14 @@ def run_dense_pipeline(
         refine_decimate / refine_regularity_weight: `refine=True`일 때
             `run_refine_mesh()`로 그대로 전달.
         smooth_high_curvature: `smooth_high_curvature_regions()`를 돌릴지.
-            기본 True -- 관측 부족 크레이터 완화 효과 실측 확인, 발가락
-            사이 등 진짜 디테일도 함께 뭉개지는 트레이드오프는 감수하기로
-            결정됨(`dense_mvs_results/README.md` 참고).
-        fill_holes: `fill_small_holes()`를 돌려 작은 구멍(핀홀)만 메울지.
-            기본 False -- 아직 실측 검증 전. 발바닥 등 큰 구멍은 크기
-            필터로 건드리지 않는다(`fill_small_holes()` docstring 참고).
-        sand_surface_enabled: `sand_surface()`를 돌려 전체 정점을 국소
-            이차곡면에 투영해 다듬을지. 기본 False -- 아직 실측 검증 전.
-            `smooth_high_curvature`(크레이터 전용, 곡률 상위만)와 달리
-            발 전체에 균일하게 적용되는 일반 노이즈 완화 단계다
-            (`sand_surface()` docstring 참고). 폴리곤 수는 그대로다.
+            기본 True. `curvature_percentile`/`curvature_rings`/
+            `curvature_iterations`/`curvature_alpha`로 강도 조절(그대로
+            `smooth_high_curvature_regions()`에 전달) -- 2026-08-12 렌더
+            비교로 기본값을 90/5/10/0.6 -> 60/6/15/0.7로 올림(표면 노이즈
+            더 확실히 죽음, 발 전체 실루엣은 유지되는 것 확인, 세부
+            디테일은 더 뭉개지는 트레이드오프 감수).
+        fill_holes / sand_surface_enabled: 기본 True(2026-08-12부터) --
+            육안 검증 완료.
         prune_protrusions: `clean_dense_point_cloud(prune_protrusions=True)`로
             전달 -- 포인트클라우드 단계(메싱 전)에서 국소 밀도 기준으로
             뿔/스파이크 후보 점을 미리 제거한다. 발목 부근 뿔 결함(알려진
@@ -1305,7 +1313,10 @@ def run_dense_pipeline(
         changed = True
 
     if smooth_high_curvature:
-        mesh = smooth_high_curvature_regions(mesh)
+        mesh = smooth_high_curvature_regions(
+            mesh, curvature_percentile=curvature_percentile, rings=curvature_rings,
+            iterations=curvature_iterations, alpha=curvature_alpha,
+        )
         changed = True
 
     if changed:
