@@ -1,9 +1,4 @@
 """점군/메쉬 정점에 쓰는 순수 기하 유틸 — PCA 축, 자기 자신의 실측 길이.
-
-`ssm/preprocessing.py`(2026-08-11 `archive/deformer_ssm_pipeline/`로 이동)에
-같은 함수가 있었지만 그건 SSM 파이프라인 전체와 함께 묶여 있었다. dense MVS
-파이프라인(`dense.py`, `pipeline.py`)은 스케일 추정에 이 작은 함수 두 개만
-필요해서, deformer/ssm 전체를 끌고 오지 않도록 여기로 분리했다.
 """
 
 from __future__ import annotations
