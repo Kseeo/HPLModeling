@@ -90,6 +90,8 @@ def run_pipeline(
     refine_decimate: float = 1.0,
     refine_regularity_weight: float | None = None,
     smooth_high_curvature: bool = True,
+    fill_holes: bool = False,
+    sand_surface_enabled: bool = False,
     keep_intermediates: bool = False,
 ) -> PipelineResult:
     """영상/사진 -> 발/피부 마스크 -> sparse SfM -> dense MVS -> 스케일 보정 메쉬.
@@ -120,7 +122,8 @@ def run_pipeline(
         visibility_filter_threshold / grazing_filter_min_score /
         reprojection_consistency_min_vote / free_space_support /
         thickness_factor / quality_factor / refine_decimate /
-        refine_regularity_weight / smooth_high_curvature:
+        refine_regularity_weight / smooth_high_curvature / fill_holes /
+        sand_surface_enabled:
             `dense.run_dense_pipeline()`으로 그대로 전달. 튜닝 근거는
             `dense.py` 모듈 docstring 및 `dense_mvs_results/README.md` 참고.
             `refine_decimate`(기본 1=해상도 보존)와 `smooth_high_curvature`
@@ -129,7 +132,8 @@ def run_pipeline(
             `refine`(느림)은 다른 필터들과 마찬가지로 기본 꺼짐 — 다른
             촬영본에서도 안전한지 아직 test03 1건만 검증됨. free_space_support/
             thickness_factor는 실측에서 부작용(메쉬 뒤틀림)만 확인돼 기본값
-            (꺼짐/1.0)을 건드리지 말 것.
+            (꺼짐/1.0)을 건드리지 말 것. `fill_holes`/`sand_surface_enabled`도
+            2026-08-12 신규 추가, 기본 꺼짐(실측 검증 전).
         keep_intermediates: `False`(기본)이면 성공 후 `workdir` 안의 모든
             중간 산출물(추출 프레임, 마스크, DB, sparse 재구성, QA용 sparse
             점군, dense MVS 스크래치)을 지운다 — 남는 건 `out_mesh` 하나뿐.
@@ -247,6 +251,7 @@ def run_pipeline(
         quality_factor=quality_factor, refine_decimate=refine_decimate,
         refine_regularity_weight=refine_regularity_weight,
         smooth_high_curvature=smooth_high_curvature,
+        fill_holes=fill_holes, sand_surface_enabled=sand_surface_enabled,
         keep_intermediates=keep_intermediates,
     )
 
