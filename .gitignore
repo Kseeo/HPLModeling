@@ -11,9 +11,11 @@ __pycache__/
 # 필요하면 별도 저장소/스토리지로 공유할 것.
 data/
 
-# 로컬 전용 Claude Code 설정 — 로컬 절대경로(사용자명 포함)·개별 허용 목록이라
-# 팀과 공유할 settings.json과 달리 커밋하지 않는다(2026-08-10, 이미 올라갔던 이력 제거함).
-.claude/settings.local.json
+# 로컬 전용 Claude Code 설정 — settings.json에도 로컬 절대경로(사용자명 포함)·개별
+# 허용 목록이 섞여 있어(2026-08-13 확인) settings.local.json뿐 아니라 .claude/ 전체를
+# 추적 안 한다(2026-08-10, 이미 올라갔던 이력 제거함; 2026-08-13, settings.json도 이력에서
+# filter-repo로 제거하고 강제 push함).
+.claude/
 
 # 에디터/OS 잡파일
 .DS_Store
