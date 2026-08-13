@@ -1,12 +1,10 @@
 """SfM에 넘기기 전, 프레임 1장 단위로 "쓸 만한가"를 판별하는 절대기준 게이트.
 
-이 모듈은 SfM을 돌리기 전, 카메라/피사체에 무관하게 보편적으로 "못 쓰는" 프레임
-(파일 손상, 렌즈 캡, 완전날아간 노출 등)
-세트 내에서 상대적인 퀄리티 판별: filter_blurry_frames()
+파일 손상/렌즈 캡/노출 과다 등 보편적으로 "못 쓰는" 프레임을 걸러낸다.
+세트 내 상대적 퀄리티 판별은 `filter_blurry_frames()`.
 
-주의 — 블러 절대 임계값(`min_sharpness`)은 기본 비활성(None):실제 촬영 영상으로
-`scripts/inspect_frame_quality.py`를 돌려 선명도 분포를 보고 임계값을 정한
-뒤 `min_sharpness`로 넘길 것.
+블러 절대 임계값(`min_sharpness`)은 기본 비활성(None) — `scripts/
+inspect_frame_quality.py`로 선명도 분포를 보고 정할 것.
 """
 
 from __future__ import annotations
@@ -70,7 +68,7 @@ def assess_frame(
 
     Args:
         min_sharpness: 라플라시안 분산 절대 임계값. None(기본)이면 이 검사를
-            건너뛴다 — 모듈 docstring 참고, 실측 없이 기본값을 넣지 않았다.
+            건너뛴다 — 카메라마다 선명도 스케일이 달라 기본값을 두지 않았다.
         max_clip_fraction: 그레이스케일 픽셀 중 (거의) 순검정/순백인 비율이
             이 값을 넘으면 렌즈 캡/완전 화이트아웃으로 보고 탈락시킨다.
     """

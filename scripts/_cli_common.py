@@ -12,7 +12,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))  # 패키지 설치 없이도 실행되도록
 
-# cp949 등 비-UTF8 콘솔에서 한글 출력이 깨지거나 죽는 문제 방지(실측 확인, 2026-08-07).
+# cp949 등 비-UTF8 콘솔에서 한글 출력이 깨지거나 죽는 문제 방지.
 for _stream_name in ("stdout", "stderr"):
     _stream = getattr(sys, _stream_name, None)
     if _stream is not None and hasattr(_stream, "reconfigure"):
