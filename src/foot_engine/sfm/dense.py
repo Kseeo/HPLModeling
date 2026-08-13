@@ -22,18 +22,23 @@ CPU 빌드로 동작합니다.
    32~53%만 남아 오히려 역효과. 상세: `data/output/dense_mvs_results/README.md`.
 3. 메쉬 생성: 형태 보존을 위해 스무딩을 OFF(`--smooth 0`)하며, 크래시 방지를 위해 멀티스레드 수를 제한합니다.
    생성 후 부유 파편은 최대 연결 요소만 남겨 제거합니다.
-4. 축 정렬: PCA 분산 순위 대신 상/하 평탄도 비대칭성을 측정하여 발바닥(-Y) 방향을 정렬합니다.
+4. 축 정렬: 길이축(PCA 최대분산) 주변을 제외한 모든 방향을 검사해 접점(바닥 접촉
+   후보점)이 가장 많은 방향을 발바닥(-Y)으로 정렬합니다(`find_sole_direction()`).
 5. 가시성 필터(`filter_point_cloud_visibility()`)는 기본 꺼짐이지만 이제 안전하게
    쓸 수 있습니다 — OpenMVS 자신의 필터 내보내기가 view 필드를 지워
    `ReconstructMesh`를 크래시시키던 문제를 `restore_point_cloud_views()`로
    고쳤습니다(2026-08-11 test03 실측: threshold=-1 기준 발바닥 100% 보존,
    경계 근방 94.7% vs 내부 97.6% 유지 — 효과는 작지만 sole 손상 없이 방향은
    맞음). `run_dense_pipeline(visibility_filter_threshold=...)`로 켤 것.
-6. 배경 오염(2D 마스크 오분류, 예: 의자를 사람으로 오분류)은 특정 프레임
-   하나가 아니라 씬의 카메라 전부에 재투영해 마스크 다수결로 판정하는
-   `filter_by_reprojection_consistency()`로 해결됩니다(2026-08-11 test03
-   실측: 육안으로 배경 제거 확인, 발바닥 편애 없이 균일하게 79% 유지).
-   `reprojection_consistency_min_vote=0.6`로 켤 것(기본 꺼짐).
+6. 배경 오염(2D 마스크 오분류, 예: 의자를 사람으로 오분류) 제거용으로
+   `filter_by_reprojection_consistency()`를 만들었으나(카메라 전부에
+   재투영해 마스크 다수결 판정), **일반적으로 켜는 걸 권장하지 않는다**
+   (2026-08-13 실측: test00 발등, test03 발뒤꿈치가 낮은 ratio(0.2)에서도
+   통째로 사라짐 — 배경 오염은 근접 각도 여러 프레임이 "일관되게 같은
+   실수"를 해 표결에서 오히려 잘 살아남는 반면, 발뒤꿈치/발등은 원래
+   관측 카메라 수 자체가 적어 어떤 ratio에서도 표가 안 모인다. 2026-08-11
+   test03에서 배경 제거가 확인됐던 건 우연히 그 케이스에서만 맞아떨어진
+   결과로 보임 — ratio를 조정해도 해결 안 될 구조적 한계, 기본 꺼짐 유지).
 7. `RefineMesh`의 `decimate` 기본값을 1(단순화 끔)로 바꿨습니다 — OpenMVS
    자체 기본값(0=auto)은 해상도를 크게 깎아 뭉툭해집니다. 대신 관측 부족
    부위에 남는 크레이터형 결함은 `smooth_high_curvature_regions()`(기본
@@ -86,7 +91,7 @@ import pycolmap
 import trimesh
 from scipy.spatial import cKDTree
 
-from .geometry import pca_axes
+from .geometry import measured_length, pca_axes
 from .reconstruction import filter_outlier_points
 
 #: OpenMVS CLI 실행파일이 있는 폴더. 환경변수로 덮어쓸 것 -- 설치 방법은 README 참고.
@@ -107,6 +112,10 @@ DEFAULT_CURVATURE_PERCENTILE = 60.0
 DEFAULT_CURVATURE_RINGS = 6
 DEFAULT_CURVATURE_ITERATIONS = 15
 DEFAULT_CURVATURE_ALPHA = 0.7
+
+#: 스케일 보정 기준 삼는 자기신고 발길이가 없을 때 쓰는 임시값(mm). 절대
+#: 축척이 아니라 형태 비교/시각화용 placeholder.
+DEFAULT_REFERENCE_LENGTH_MM = 250.0
 
 
 def _resolve_openmvs_bin(openmvs_bin: str | Path | None) -> Path:
@@ -378,9 +387,14 @@ def filter_by_reprojection_consistency(
     Args:
         masks_dir: `masking.generate_masks()` 원본 마스크 폴더(OpenMVS 변환
             전, `<원본파일명>.png`).
-        min_vote_ratio: 이 미만이면 제거(0~1). 실측(test03, 의자 오염 vs
-            발 대조군): 0.6에서 의자 후보 44% 제거/발 오제거 11%, 0.7에서
-            74%/17%.
+        min_vote_ratio: 이 미만이면 제거(0~1). **주의**: "발 오제거 11%"
+            같은 평균 수치는 오해를 부른다 -- 실측(2026-08-13, test00/03)
+            결과 손실이 전체에 고르게 분산되지 않고 관측 카메라 수가 적은
+            특정 부위(발등/발뒤꿈치)에 집중돼, 낮은 ratio(0.2)에서도 그
+            부위가 통째로 날아갈 수 있다. 배경 오염은 근접 각도 여러
+            프레임이 같은 실수를 공유해 표결에서 오히려 잘 살아남는 반면
+            그 부위는 원래 표가 적어서다 -- ratio 조정으로 해결되는
+            문제가 아니므로 일반적으로 켜지 말 것.
 
     Returns:
         (원본 점 개수, 유지된 점 개수).
@@ -1052,107 +1066,169 @@ def align_principal_axes(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
     return aligned
 
 
-def _flatness(points: np.ndarray) -> float:
-    """점 뭉치의 평탄도 -- PCA 고유값 중 가장 작은 것 / 가장 큰 것.
-
-    0에 가까울수록 평평한 판 모양(발바닥 후보), 1에 가까울수록 등방적
-    (구형)이거나 굴곡진 형태(발등/발목 후보)다.
-    """
-    c = points - points.mean(axis=0)
-    cov = c.T @ c
-    ev = np.linalg.eigvalsh(cov)
-    return float(ev[0] / max(ev[-1], 1e-9))
+def _fibonacci_sphere(n: int) -> np.ndarray:
+    """구 표면에 n개 방향을 고르게 뿌린다((n, 3) 단위벡터) -- 피보나치 나선."""
+    i = np.arange(n)
+    golden = (1.0 + 5.0 ** 0.5) / 2.0
+    z = 1.0 - 2.0 * (i + 0.5) / n
+    r = np.sqrt(np.clip(1.0 - z * z, 0.0, None))
+    theta = 2.0 * np.pi * i / golden
+    return np.stack([r * np.cos(theta), r * np.sin(theta), z], axis=1)
 
 
 def find_sole_direction(
-    local_vertices: np.ndarray,
+    centered_vertices: np.ndarray,
+    length_axis: np.ndarray,
     *,
-    candidate_axes: tuple[int, ...] = (1, 2),
-    percentiles: tuple[float, ...] = (8.0, 15.0, 20.0),
-) -> tuple[int, float]:
-    """PCA 정렬된 로컬 좌표에서 발바닥(접지면) 축과 방향(부호)을 추정한다.
+    n_directions: int = 360,
+    exclude_cone_deg: float = 40.0,
+    contact_band_ratio: float = 0.03,
+    max_sample_points: int = 20_000,
+    rng: np.random.Generator | None = None,
+) -> np.ndarray:
+    """모든 방향을 검사해, 그 방향으로 투영했을 때 접지면 근방(최솟값 부근)에
+    점이 가장 많이 몰리는 방향을 발바닥(아래) 방향으로 고른다.
 
-    핵심 가정: 발바닥은 지지면이라 상대적으로 평평하고, 반대쪽(발등/발목)은
-    아치·발목 돌출 때문에 굴곡이 있다 -- 즉 진짜 "높이(위/아래)" 축은 한쪽
-    끝은 평평하고 반대쪽 끝은 굴곡진 **비대칭**을 보이는 반면, "너비" 축은
-    양쪽(안쪽/바깥쪽 복사뼈 라인)이 둘 다 어느 정도 굴곡져 있어 비대칭이
-    약하다. PCA 분산 순위(축1=중간, 축2=최소)만으로 어느 게 높이인지
-    가정하지 않는다 -- 실측 확인(test03, 2026-08-11): SfM 재구성 노이즈
-    때문에 분산 순위가 실제 길이/너비/높이 순서와 안 맞는 경우가 있었다
-    (축1/축2 고유값비가 1.6배로, 폭:높이 실측 비율(약 1.5~2배 표준편차,
-    고유값으론 제곱이라 3배 이상 기대)보다 훨씬 덜 벌어짐). 대신 두 후보
-    축 모두에 대해 이 평탄도 비대칭을 실제로 측정해, 비대칭이 더 크고
-    percentile 크기에 걸쳐(8/15/20%) 더 일관된 쪽을 높이 축으로 뽑는다.
+    이전 버전은 PCA 분산 순위로 정한 두 후보 축(축1/축2) 중 평탄도
+    비대칭이 큰 쪽만 골랐는데, 실측(test03, 2026-08-11)에서 분산 순위가
+    실제 길이/너비/높이 순서와 어긋나는 경우가 있어 후보 자체가 틀릴 수
+    있었다. 대신 여기서는 구 위 `n_directions`개 방향 전부에 대해 "그
+    방향 최솟값에서 `contact_band_ratio`(발 크기 대비 비율) 이내에 점이
+    몇 개인가"를 직접 세어(=바닥에 닿는 접점 수) 가장 많은 방향을 고른다
+    -- 어느 두 축에도 갇히지 않는다.
+
+    다만 완전히 전 방향(구 전체)을 열어두면 발목 절단면처럼 촬영/메쉬
+    구멍 메움으로 생긴 인위적인 평면이 발바닥보다 더 넓고 평평하게 잡혀
+    잘못 고를 위험이 있다 -- 발바닥 방향은 발 길이축과 대략 수직이라는
+    사전 지식(`align_principal_axes()` 등에서도 써 온 가정)으로 길이축
+    기준 `exclude_cone_deg` 이내(발끝/발목 쪽) 방향은 후보에서 제외한다.
 
     Args:
-        local_vertices: PCA 정렬 로컬 좌표(중심이 원점, 열 순서가 분산
-            내림차순인 축과 일치해야 함) -- 보통 `align_sole_down()`이
-            내부에서 만들어 넘긴다.
-        candidate_axes: 높이 축 후보 열 인덱스. 기본 (1, 2) -- 축0(최대
-            분산)은 발 길이 축이 거의 확실해 후보에서 제외.
+        centered_vertices: 중심이 원점으로 이동된 정점 좌표(정렬 전 원본
+            축 기준이어도 무방 -- 방향 자체를 구 전체에서 찾는다).
+        length_axis: 발 길이 방향 단위벡터(원뿔 제외 기준). 보통 PCA
+            최대분산 축.
+        contact_band_ratio: 접점으로 칠 허용 오차 -- bounding diagonal 대비
+            비율.
 
     Returns:
-        (height_axis_idx, sign) -- `local_vertices[:, height_axis_idx] * sign`이
-        "위(발등 쪽)"가 되도록 하는 부호. 호출자는 이 축을 최종 Y로 보내고
-        부호를 반전해(발바닥이 -Y) 정렬할 것.
+        아래(발바닥) 방향 단위벡터.
     """
-    best_axis, best_score, best_sign = candidate_axes[0], -1.0, 1.0
-    for axis_idx in candidate_axes:
-        h = local_vertices[:, axis_idx]
-        asymmetries: list[float] = []
-        votes: list[float] = []
-        for pct in percentiles:
-            lo = local_vertices[h <= np.percentile(h, pct)]
-            hi = local_vertices[h >= np.percentile(h, 100.0 - pct)]
-            if len(lo) < 10 or len(hi) < 10:
-                continue
-            f_lo, f_hi = _flatness(lo), _flatness(hi)
-            asymmetries.append(abs(f_lo - f_hi))
-            votes.append(1.0 if f_lo < f_hi else -1.0)  # lo가 더 평평하면 "위"는 +쪽
-        if not asymmetries:
-            continue
-        score = float(np.mean(asymmetries))
-        sign = 1.0 if sum(v > 0 for v in votes) >= len(votes) / 2 else -1.0
-        if score > best_score:
-            best_axis, best_score, best_sign = axis_idx, score, sign
-    return best_axis, best_sign
+    if rng is None:
+        rng = np.random.default_rng(0)
+
+    if len(centered_vertices) > max_sample_points:
+        idx = rng.choice(len(centered_vertices), size=max_sample_points, replace=False)
+        sample = centered_vertices[idx]
+    else:
+        sample = centered_vertices
+
+    directions = _fibonacci_sphere(n_directions)
+    cos_thresh = np.cos(np.radians(exclude_cone_deg))
+    keep = np.abs(directions @ length_axis) <= cos_thresh
+    directions = directions[keep]
+
+    diag = float(np.linalg.norm(sample.max(axis=0) - sample.min(axis=0)))
+    band = diag * contact_band_ratio
+
+    proj = sample @ directions.T  # (n_sample, n_kept_directions)
+    mins = proj.min(axis=0)
+    contact_counts = (proj <= (mins + band)).sum(axis=0)
+
+    # 접점은 뽑힌 방향의 "최솟값" 쪽에 있으므로, 발바닥이 실제로 있는 방향은
+    # 부호를 뒤집은 쪽이다.
+    best = int(np.argmax(contact_counts))
+    return -directions[best]
 
 
-def align_sole_down(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
+def align_sole_down(
+    mesh: trimesh.Trimesh,
+    *,
+    n_directions: int = 360,
+    exclude_cone_deg: float = 40.0,
+    contact_band_ratio: float = 0.03,
+) -> trimesh.Trimesh:
     """`align_principal_axes()`의 다음 단계 -- 발바닥까지 검출해 최종 좌표계를
     X=길이축, Y=높이축(발바닥이 -Y), Z=너비축으로 맞춘다(중심은 원점).
 
-    `find_sole_direction()`(모듈 docstring 참고)으로 높이 축과 부호를
-    실측 기반 평탄도 비대칭으로 추정한다. **주의**: 지금 촬영 프로토콜은
-    발바닥을 직접 못 찍어(모듈 상단 "알려진 한계" 참고) 그 부위 표면이
-    그래프컷이 메운 결과일 수 있다 -- 그래도 실측 확인(test03,
-    2026-08-11)해보니 발바닥 쪽이 발등/발목 쪽보다 뚜렷이 더 평평하게
-    나와 이 휴리스틱이 신호를 잡아낸다. 다만 매 실행마다 검증된 건
-    아니므로, 최종 산출물에 쓰기 전 실제 뷰어로 확인할 것.
+    `find_sole_direction()`(위 참고)으로 모든 방향을 검사해 접점(바닥 접촉
+    후보점)이 가장 많은 방향을 발바닥으로 고른다. **주의**: 지금 촬영
+    프로토콜은 발바닥을 직접 못 찍어(모듈 상단 "알려진 한계" 참고) 그
+    부위 표면이 그래프컷이 메운 결과일 수 있다 -- 그래도 실측 확인
+    (test03, 2026-08-11)해보니 발바닥 쪽이 발등/발목 쪽보다 뚜렷이 더
+    평평하게 나와 이 휴리스틱이 신호를 잡아낸다. 다만 매 실행마다
+    검증된 건 아니므로, 최종 산출물에 쓰기 전 실제 뷰어로 확인할 것.
     """
     centroid = mesh.vertices.mean(axis=0)
     c = mesh.vertices - centroid
-    cov = c.T @ c
-    eigvals, eigvecs = np.linalg.eigh(cov)
-    order = np.argsort(eigvals)[::-1]
-    sorted_axes = eigvecs[:, order]
-    local = c @ sorted_axes
 
-    height_idx, sign = find_sole_direction(local)
-    width_idx = 2 if height_idx == 1 else 1
+    length_axis = pca_axes(c)[:, 0]
+    down = find_sole_direction(
+        c, length_axis,
+        n_directions=n_directions, exclude_cone_deg=exclude_cone_deg,
+        contact_band_ratio=contact_band_ratio,
+    )
 
-    final_axes = np.stack([
-        sorted_axes[:, 0],
-        sorted_axes[:, height_idx] * sign,  # sign은 "축*sign=위(발등)" 정의(find_sole_direction 참고) -- 그대로 Y로
-        sorted_axes[:, width_idx],
-    ], axis=1)
-    if np.linalg.det(final_axes) < 0:
-        final_axes = final_axes.copy()
-        final_axes[:, -1] *= -1.0  # 너비축(이미 결정 근거 없음) 부호만 뒤집어 순수 회전 유지
+    y_axis = -down
+    x_axis = length_axis - (length_axis @ y_axis) * y_axis  # y_axis에 재직교화
+    x_axis /= np.linalg.norm(x_axis)
+    z_axis = np.cross(x_axis, y_axis)
+    z_axis /= np.linalg.norm(z_axis)
+    x_axis = np.cross(y_axis, z_axis)  # 순수 회전(det=+1) 보장
+
+    final_axes = np.stack([x_axis, y_axis, z_axis], axis=1)
 
     aligned = mesh.copy()
     aligned.vertices = c @ final_axes
     return aligned
+
+
+def rest_on_floor(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
+    """발바닥 최저점이 Y=0에 오도록 Y축으로만 평행이동한다.
+
+    `align_sole_down()`이 정한 좌표계(발바닥=-Y)를 전제로 한다 -- 그 전에
+    부르면 무의미하다.
+    """
+    resting = mesh.copy()
+    resting.apply_translation([0.0, -mesh.vertices[:, 1].min(), 0.0])
+    return resting
+
+
+def finalize_mesh(
+    mesh: trimesh.Trimesh,
+    *,
+    reference_length_mm: float | None = None,
+) -> tuple[trimesh.Trimesh, float]:
+    """`run_dense_pipeline()`이 만든 원본 메쉬(임의 좌표계/임의 스케일)를
+    축 정렬 + 스케일링 + 바닥 정착까지 마친 최종 메쉬로 만든다.
+
+    `run_pipeline()`과 `run_dense_pipeline.py`(sparse 재계산 없이 dense만
+    다시 돌리는 단독 스크립트) 양쪽이 이 함수를 공유한다 -- 전에는 이
+    후처리가 `run_pipeline()` 안에만 있어, 단독 스크립트로 만든 메쉬는
+    정렬/접지가 안 된 채로 나갔다.
+
+    Returns:
+        (정렬/스케일/접지 완료된 메쉬, 적용된 스케일 배율)
+    """
+    mesh = align_sole_down(mesh)
+
+    resolved_reference_length_mm = reference_length_mm
+    if resolved_reference_length_mm is None:
+        resolved_reference_length_mm = DEFAULT_REFERENCE_LENGTH_MM
+        print(
+            f"[스케일] 자기신고 발길이 없음 — placeholder {DEFAULT_REFERENCE_LENGTH_MM:.0f}mm 기준으로"
+            " 스케일링(절대 축척 아님, 형태 비교/시각화용 임시값 — 실사용 전 반드시 확인할 것)"
+        )
+    own_length = measured_length(mesh.vertices)
+    scale_factor = resolved_reference_length_mm / own_length
+    mesh.apply_scale(scale_factor)
+    print(
+        f"[스케일] 메쉬 자체 PCA 길이 {own_length:.4f}(SfM 임의 단위) -> "
+        f"{resolved_reference_length_mm:.1f}mm 기준(x{scale_factor:.4f})"
+    )
+
+    mesh = rest_on_floor(mesh)
+    return mesh, scale_factor
 
 
 def run_dense_pipeline(

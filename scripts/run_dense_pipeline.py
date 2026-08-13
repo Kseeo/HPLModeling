@@ -15,7 +15,9 @@ smooth=0 등)는 `dense.py` 모듈 docstring 참고.
 
 이 스크립트로 dense 파라미터만 바꿔 재실행하려면(sparse SfM 재계산 없이),
 1번을 `--keep-intermediates`로 돌려 images/sparse를 남겨둬야 한다 — 기본은
-끝나면 정리됨(`dense.py` docstring 8번 참고).
+끝나면 정리됨(`dense.py` docstring 8번 참고). 재튜닝이 끝나 더는 이 run_dir로
+돌아올 일이 없으면 `--cleanup-sfm-scratch`로 이미 다 쓴 sparse SfM 찌꺼기
+(masks/, database.db, sparse_points.ply, cleaned_points.ply)를 지운다.
 
 사용 예::
 
@@ -36,12 +38,15 @@ smooth=0 등)는 `dense.py` 모듈 docstring 참고.
 from __future__ import annotations
 
 import argparse
+import shutil
 from pathlib import Path
+
+import trimesh
 
 import _cli_common  # noqa: F401  -- sys.path 설정 + 콘솔 UTF-8 고정(부작용 import)
 from _dense_cli_args import add_dense_args  # noqa: E402
 
-from foot_engine.sfm.dense import largest_sparse_dir, run_dense_pipeline  # noqa: E402
+from foot_engine.sfm.dense import finalize_mesh, largest_sparse_dir, run_dense_pipeline  # noqa: E402
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -63,6 +68,17 @@ def main(argv: list[str] | None = None) -> int:
         help="마스크 폴더(생략 시 <run_dir>/masks_dense 재사용, 없으면 dilate=0으로 새로 생성).",
     )
     parser.add_argument("--out-dir", type=Path, default=None, help="산출물 폴더(기본 <run_dir>/dense_mvs)")
+    parser.add_argument(
+        "--reference-length-mm", type=float, default=None,
+        help="자기신고 발길이(mm). 있으면 최종 메쉬를 이 길이에 맞춰 스케일링한다"
+             "(SfM은 절대 축척이 없음). 생략하면 250mm placeholder로 스케일링하고 경고 출력.",
+    )
+    parser.add_argument(
+        "--cleanup-sfm-scratch", action="store_true",
+        help="완료 후 run_dir 안에서 dense 단계가 이미 다 써서 더는 필요 없는 sparse SfM "
+             "찌꺼기(masks/, database.db, sparse_points.ply, cleaned_points.ply)를 지운다. "
+             "dense 파라미터 재튜닝에 또 쓰이는 images/sparse/masks_dense는 건드리지 않는다.",
+    )
     add_dense_args(parser)  # --openmvs-bin, --refine, --max-threads 등 (dense.py와 공유)
     args = parser.parse_args(argv)
 
@@ -110,7 +126,29 @@ def main(argv: list[str] | None = None) -> int:
         prune_protrusions=args.prune_protrusions,
         keep_intermediates=args.keep_intermediates,
     )
-    print(f"\n최종 메쉬: {mesh_path}")
+
+    # run_dense_pipeline()이 만든 mesh_path는 임의 좌표계/임의 스케일 —
+    # run_pipeline()과 동일한 후처리(축 정렬 + 스케일링 + 바닥 정착)를 거쳐
+    # 같은 자리에 덮어쓴다.
+    mesh = trimesh.load(mesh_path, process=False)
+    mesh, scale_factor = finalize_mesh(mesh, reference_length_mm=args.reference_length_mm)
+    mesh.export(mesh_path)
+
+    print(f"\n최종 메쉬: {mesh_path} (정점 {len(mesh.vertices):,}개, 스케일 x{scale_factor:.4f})")
+
+    if args.cleanup_sfm_scratch:
+        removed = []
+        for name in ("masks", "database.db", "sparse_points.ply", "cleaned_points.ply"):
+            target = run_dir / name
+            if target.is_dir():
+                shutil.rmtree(target, ignore_errors=True)
+                removed.append(name)
+            elif target.is_file():
+                target.unlink()
+                removed.append(name)
+        if removed:
+            print(f"[정리] sparse SfM 찌꺼기 삭제: {', '.join(removed)}")
+
     return 0
 
 
