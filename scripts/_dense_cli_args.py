@@ -113,6 +113,19 @@ def add_dense_args(
              "기본 켜짐 — 정점/면 개수는 그대로다.",
     )
     parser.add_argument(
+        "--sand-min-neighbors", type=int, default=16,
+        help="sand_surface 국소 곡면 피팅에 쓸 최소 이웃 수(기본 16). 키우면 더 "
+             "매끈해지지만 디테일도 죽는다.",
+    )
+    parser.add_argument(
+        "--sand-max-neighbors", type=int, default=32,
+        help="sand_surface 이웃 상한(기본 32).",
+    )
+    parser.add_argument(
+        "--sand-iterations", type=int, default=3,
+        help="sand_surface 반복 횟수(기본 3).",
+    )
+    parser.add_argument(
         "--prune-protrusions", action="store_true",
         help="포인트클라우드 단계(메싱 전)에서 국소 밀도 기준으로 뿔/스파이크 후보 점을 "
              "미리 제거한다(clean_dense_point_cloud prune_protrusions). 발목 부근 뿔 결함을 "

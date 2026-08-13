@@ -89,6 +89,9 @@ def run_pipeline(
     curvature_alpha: float = dense.DEFAULT_CURVATURE_ALPHA,
     fill_holes: bool = True,
     sand_surface_enabled: bool = True,
+    sand_min_neighbors: int = 16,
+    sand_max_neighbors: int = 32,
+    sand_iterations: int = 3,
     prune_protrusions: bool = False,
     keep_intermediates: bool = False,
 ) -> PipelineResult:
@@ -237,6 +240,8 @@ def run_pipeline(
         curvature_percentile=curvature_percentile, curvature_rings=curvature_rings,
         curvature_iterations=curvature_iterations, curvature_alpha=curvature_alpha,
         fill_holes=fill_holes, sand_surface_enabled=sand_surface_enabled,
+        sand_min_neighbors=sand_min_neighbors, sand_max_neighbors=sand_max_neighbors,
+        sand_iterations=sand_iterations,
         prune_protrusions=prune_protrusions,
         keep_intermediates=keep_intermediates,
     )

@@ -573,6 +573,8 @@ def run_refine_mesh(
     openmvs_bin: str | Path | None = None,
     decimate: float = 1.0,
     regularity_weight: float | None = None,
+    resolution_level: int = 0,
+    scales: int = 2,
     output_name: str = "scene_mesh_refined.mvs",
 ) -> Path:
     """사진 광도일관성 기반으로 메쉬 정점 위치를 보정한다 (선택적, 가장 느린 단계).
@@ -586,9 +588,17 @@ def run_refine_mesh(
             해상도 보존).
         regularity_weight: photo-consistency 대 표면 정규화(smoothness) 항
             가중치. `None`이면 OpenMVS 기본값(0.2) 사용.
+        resolution_level: 계산 전 이미지를 몇 단계 축소할지(기본 0=원본
+            해상도). 소요 시간에 가장 직접적으로 영향 -- 1~2로 올리면
+            빨라지는 대신 정밀도가 낮아진다.
+        scales: 다단계 최적화 반복 횟수(기본 2). 줄이면 빨라지는 대신
+            거칠어진다.
     """
     bin_dir = _resolve_openmvs_bin(openmvs_bin)
-    args = [scene_mvs.name, "-m", mesh_ply.name, "-o", output_name, "--decimate", str(decimate)]
+    args = [
+        scene_mvs.name, "-m", mesh_ply.name, "-o", output_name, "--decimate", str(decimate),
+        "--resolution-level", str(resolution_level), "--scales", str(scales),
+    ]
     if regularity_weight is not None:
         args += ["--regularity-weight", str(regularity_weight)]
     _run_openmvs(
@@ -991,14 +1001,12 @@ def _fibonacci_sphere(n: int) -> np.ndarray:
 
 
 def find_sole_direction(
-    centered_vertices: np.ndarray,
+    surface_points: np.ndarray,
     length_axis: np.ndarray,
     *,
     n_directions: int = 360,
     exclude_cone_deg: float = 40.0,
     contact_band_ratio: float = 0.03,
-    max_sample_points: int = 20_000,
-    rng: np.random.Generator | None = None,
 ) -> np.ndarray:
     """구 위의 모든 방향을 검사해, 그 방향으로 투영했을 때 최솟값 근방에
     점이 가장 많이 몰리는(=접지면 후보) 방향을 발바닥(아래) 방향으로 고른다.
@@ -1007,7 +1015,11 @@ def find_sole_direction(
     방향은 후보에서 제외한다 -- 발바닥은 길이축과 대략 수직이라는 가정.
 
     Args:
-        centered_vertices: 중심이 원점으로 이동된 정점 좌표.
+        surface_points: 중심이 원점으로 이동된, **표면적 기준 균등 샘플**
+            점(`trimesh.sample.sample_surface()` 등). 정점(vertex)을 그대로
+            쓰면 안 된다 -- 곡률이 큰 부위(돌기/스파이크)는 삼각형이 잘게
+            쪼개져 정점이 몰리므로, 진짜 넓은 발바닥보다 작은 돌기 하나가
+            "접점이 더 많다"고 잘못 이길 수 있다.
         length_axis: 발 길이 방향 단위벡터(원뿔 제외 기준).
         contact_band_ratio: 접점으로 칠 허용 오차 -- bounding diagonal 대비
             비율.
@@ -1015,15 +1027,7 @@ def find_sole_direction(
     Returns:
         아래(발바닥) 방향 단위벡터.
     """
-    if rng is None:
-        rng = np.random.default_rng(0)
-
-    if len(centered_vertices) > max_sample_points:
-        idx = rng.choice(len(centered_vertices), size=max_sample_points, replace=False)
-        sample = centered_vertices[idx]
-    else:
-        sample = centered_vertices
-
+    sample = surface_points
     directions = _fibonacci_sphere(n_directions)
     cos_thresh = np.cos(np.radians(exclude_cone_deg))
     keep = np.abs(directions @ length_axis) <= cos_thresh
@@ -1048,18 +1052,25 @@ def align_sole_down(
     n_directions: int = 360,
     exclude_cone_deg: float = 40.0,
     contact_band_ratio: float = 0.03,
+    n_surface_samples: int = 20_000,
+    rng: np.random.Generator | None = None,
 ) -> trimesh.Trimesh:
     """`align_principal_axes()`의 다음 단계 -- 발바닥까지 검출해 최종 좌표계를
     X=길이축, Y=높이축(발바닥이 -Y), Z=너비축으로 맞춘다(중심은 원점).
 
-    `find_sole_direction()`(위 참고)으로 발바닥 방향을 고른다.
+    `find_sole_direction()`(위 참고)으로 발바닥 방향을 고른다 -- 표면적
+    기준 균등 샘플(정점이 아니라)을 넘겨 메쉬 삼각화 밀도 편향을 피한다.
     """
+    if rng is None:
+        rng = np.random.default_rng(0)
+
     centroid = mesh.vertices.mean(axis=0)
     c = mesh.vertices - centroid
 
     length_axis = pca_axes(c)[:, 0]
+    surface_points, _ = trimesh.sample.sample_surface(mesh, n_surface_samples, seed=rng)
     down = find_sole_direction(
-        c, length_axis,
+        surface_points - centroid, length_axis,
         n_directions=n_directions, exclude_cone_deg=exclude_cone_deg,
         contact_band_ratio=contact_band_ratio,
     )
@@ -1078,26 +1089,59 @@ def align_sole_down(
     return aligned
 
 
-def rest_on_floor(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
-    """발바닥 최저점이 Y=0에 오도록 Y축으로만 평행이동한다.
+def rest_on_floor(
+    mesh: trimesh.Trimesh,
+    *,
+    floor_percentile: float = 0.5,
+    n_surface_samples: int = 20_000,
+    rng: np.random.Generator | None = None,
+) -> trimesh.Trimesh:
+    """발바닥이 Y=0에 오도록 Y축으로만 평행이동한다.
 
-    `align_sole_down()`이 정한 좌표계(발바닥=-Y)를 전제로 한다 -- 그 전에
-    부르면 무의미하다.
+    단일 최저 정점(`.min()`)이 아니라 `floor_percentile`(기본 0.5%) 백분위를
+    기준으로 삼는다 -- 진짜 접지면이 아니라 노이즈 스파이크 하나가 최저점을
+    차지하고 있으면(발목 뿔 결함 등) 그 점 하나에 전체 메쉬가 매달려
+    나머지는 뜨는 문제를 피하기 위함이다. 정점이 아니라 표면적 기준 균등
+    샘플로 백분위를 계산한다 -- `find_sole_direction()`과 같은 이유로,
+    정점 그대로 쓰면 삼각화가 촘촘한 작은 돌기가 과대표집된다.
+    `align_sole_down()`이 정한 좌표계(발바닥=-Y)를 전제로 한다.
     """
+    if rng is None:
+        rng = np.random.default_rng(0)
+    surface_points, _ = trimesh.sample.sample_surface(mesh, n_surface_samples, seed=rng)
+    floor_y = float(np.percentile(surface_points[:, 1], floor_percentile))
     resting = mesh.copy()
-    resting.apply_translation([0.0, -mesh.vertices[:, 1].min(), 0.0])
+    resting.apply_translation([0.0, -floor_y, 0.0])
     return resting
+
+
+def to_z_up(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
+    """Y=높이 좌표계를 Z=높이로 바꾼다(X축 기준 90도 회전, 형태 왜곡 없음).
+
+    대부분의 3D 뷰어/슬라이서는 Z를 "위"로 가정한다 -- `align_sole_down()`/
+    `rest_on_floor()`가 만드는 Y=높이 좌표계 그대로 내보내면 그런 뷰어에서
+    발이 옆으로 누운 것처럼 보인다.
+    """
+    rotated = mesh.copy()
+    x, y, z = mesh.vertices[:, 0], mesh.vertices[:, 1], mesh.vertices[:, 2]
+    rotated.vertices = np.stack([x, -z, y], axis=1)
+    return rotated
 
 
 def finalize_mesh(
     mesh: trimesh.Trimesh,
     *,
     reference_length_mm: float | None = None,
+    z_up: bool = True,
 ) -> tuple[trimesh.Trimesh, float]:
     """`run_dense_pipeline()`이 만든 원본 메쉬(임의 좌표계/임의 스케일)를
     축 정렬 + 스케일링 + 바닥 정착까지 마친 최종 메쉬로 만든다.
 
     `run_pipeline()`과 `run_dense_pipeline.py`가 공유한다.
+
+    Args:
+        z_up: 기본 True -- 내부적으로는 Y=높이로 계산하지만, 최종 결과는
+            `to_z_up()`으로 Z=높이 좌표계로 내보낸다(대부분의 뷰어 관례).
 
     Returns:
         (정렬/스케일/접지 완료된 메쉬, 적용된 스케일 배율)
@@ -1120,6 +1164,8 @@ def finalize_mesh(
     )
 
     mesh = rest_on_floor(mesh)
+    if z_up:
+        mesh = to_z_up(mesh)
     return mesh, scale_factor
 
 
@@ -1148,6 +1194,9 @@ def run_dense_pipeline(
     curvature_alpha: float = DEFAULT_CURVATURE_ALPHA,
     fill_holes: bool = True,
     sand_surface_enabled: bool = True,
+    sand_min_neighbors: int = 16,
+    sand_max_neighbors: int = 32,
+    sand_iterations: int = 3,
     prune_protrusions: bool = False,
     keep_intermediates: bool = False,
 ) -> Path:
@@ -1161,9 +1210,13 @@ def run_dense_pipeline(
         grazing_filter_min_score(None): grazing 필터 임계값, visibility보다 먼저 적용.
         reprojection_consistency_min_vote(None): 배경 오염 필터, 권장 안 함.
         free_space_support/thickness_factor/quality_factor: `run_reconstruct_mesh()` 전달.
-        refine_decimate/refine_regularity_weight: `refine=True`일 때 `run_refine_mesh()` 전달.
+        refine_decimate/refine_regularity_weight: `refine=True`일 때 `run_refine_mesh()`
+            전달. resolution_level/scales는 항상 최고 정밀도(0/2)로 고정 -- 낮추면 폭
+            치수가 실행마다 달라지는 문제가 있어 노출하지 않는다.
         smooth_high_curvature(True): 고곡률 스무딩 여부, curvature_* 로 강도 조절.
         fill_holes/sand_surface_enabled(True): 구멍 메움/사포질 후처리.
+        sand_min_neighbors/sand_max_neighbors/sand_iterations: `sand_surface()`
+            강도(이웃 범위/반복 횟수) — 키울수록 매끈해지지만 디테일도 죽는다.
         prune_protrusions(False): 포인트클라우드 단계 뿔 프루닝.
         keep_intermediates(False): 중간 산출물 보존 여부.
     """
@@ -1241,7 +1294,10 @@ def run_dense_pipeline(
             changed = True
 
     if sand_surface_enabled:
-        mesh = sand_surface(mesh)
+        mesh = sand_surface(
+            mesh, min_neighbors=sand_min_neighbors, max_neighbors=sand_max_neighbors,
+            iterations=sand_iterations,
+        )
         changed = True
 
     if smooth_high_curvature:

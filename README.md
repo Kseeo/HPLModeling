@@ -80,8 +80,10 @@ python -m venv .venv
 
 # 2) 의존성 설치 — 현재 개발 venv 기준 핵심 패키지 목록
 pip install numpy scipy scikit-learn trimesh[easy] pycolmap opencv-python-headless `
-    opencv-contrib-python rembg mediapipe onnxruntime pillow networkx pytest
+    opencv-contrib-python rembg mediapipe onnxruntime pillow networkx pytest streamlit
 ```
+
+`streamlit`은 `scripts/ui_app.py`(웹 UI)에만 필요하다 — CLI만 쓸 거면 생략 가능.
 
 > `pip freeze > requirements.txt`로 현재 venv를 그대로 고정하는 게
 > 가장 정확하다 — 위 목록은 `import` 기준으로 추린 핵심 패키지만 나열한
@@ -151,6 +153,12 @@ python scripts/run_sfm_pipeline.py --video data/samples/test00.mp4 `
     --out data/output/test00_pipeline_fit.stl
 ```
 
+**웹 UI로 실행하려면**(영상 업로드 → 프레임 추출 → 이미지 선택/삭제 → 파이프라인 실행):
+
+```powershell
+streamlit run scripts/ui_app.py
+```
+
 ## 단계별로 나눠 돌리기
 
 중간 산출물을 뷰어로 직접 확인하고 싶을 때:
@@ -218,6 +226,7 @@ python scripts/inspect_frame_quality.py data/output/sfm_prototype/test00_run/ima
 | `clean_point_cloud.py` | sparse 점군 배경/노이즈 제거만 단독 실행 (QA용) |
 | `run_dense_pipeline.py` | sparse SfM 결과 → OpenMVS dense 메쉬. 별도 설치 필요(OpenMVS) |
 | `compare_stl_pair.py` | STL 두 개를 정점/면/부피/watertight 기준으로 비교하는 진단 도구 |
+| `ui_app.py` | 영상 업로드 → 프레임 추출 → 이미지 선택/삭제 → 파이프라인 실행 웹 UI(`streamlit run`으로 실행) |
 
 각 스크립트의 정확한 인자와 예시는 파일 상단 docstring에 있다 — 위 표는
 요약이다. 모두 `--help`로 인자 목록을 볼 수 있다.
