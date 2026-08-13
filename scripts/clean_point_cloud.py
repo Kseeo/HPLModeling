@@ -2,9 +2,9 @@
 
 실제 로직은 `foot_engine.sfm.cleaning`에 있다 — 이 파일은 인자 파싱과 출력
 포맷만 담당하는 얇은 CLI 래퍼다. 방식 설명(마스크 기반 vs 기하학적 폴백,
-`--intersect`/`--cluster`의 실측된 위험/이점)은 그 모듈의 docstring 참고.
+`--intersect`/`--cluster`의 위험/이점)은 그 모듈의 docstring 참고.
 
-**최종 권장 조합: `--masks-dir ... --cluster` (교집합 없이).**
+최종 권장 조합: `--masks-dir ... --cluster` (교집합 없이).
 
 사용 예(권장 조합)::
 
@@ -43,7 +43,7 @@ def main(argv: list[str] | None = None) -> int:
         "--intersect", action="store_true",
         help="--masks-dir와 함께 쓰면 마스크 분류와 기하학적 방식을 둘 다 돌려서 "
              "교집합(둘 다 배경이라고 동의한 점)만 제거한다. 실험적 — 발 형상을 깎아낼 "
-             "위험이 실측으로 확인됐다(`foot_engine.sfm.cleaning` docstring 참고).",
+             "위험이 있다(`foot_engine.sfm.cleaning` docstring 참고).",
     )
     parser.add_argument(
         "--mask-min-ratio", type=float, default=0.5,
@@ -68,7 +68,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--cluster", action="store_true",
         help="정리 뒤에 군집화(DBSCAN)까지 추가로 적용한다. 기본은 꺼져 있다 — sparse한 "
-             "점군에서 군집화가 피사체를 조각내는 부작용이 실측으로 확인됐다(모듈 docstring 참고).",
+             "점군에서 군집화가 피사체를 조각낼 수 있다(모듈 docstring 참고).",
     )
     args = parser.parse_args(argv)
 

@@ -1,18 +1,9 @@
 """영상/사진 한 벌 -> dense MVS 발 메쉬. `foot_engine.sfm` 전체를 한 번에 돌리는 CLI.
 
-내부적으로 아래 단계를 순서대로 실행한다(각 단계를 따로 돌리고 싶으면
-`sparse_sfm_prototype.py` / `generate_foot_masks.py` / `clean_point_cloud.py` /
-`run_dense_pipeline.py`를 개별적으로 쓸 것 — 중간 결과를 실제 뷰어로 확인하고
-싶을 때 유용하다):
-
-    1. (영상이면) 프레임 추출
-    2. 발/피부 마스크 생성 (rembg + MediaPipe 피부 정제)
-    3. Sparse SfM 복원 (pycolmap)
-    4. Dense MVS + 메싱 (OpenMVS, 별도 설치 필요 — README 참고)
-    5. 스케일 보정(자기신고 발길이 기준, 없으면 placeholder)
-
-2026-08-10부로 `FootMeshDeformer` 템플릿 워프 경로를 대체했다 —
-`sfm/pipeline.py` 모듈 docstring 참고.
+단계: 프레임 추출(영상이면) -> 발/피부 마스크 -> sparse SfM -> dense MVS
++ 메싱 -> 스케일 보정. 각 단계를 따로 돌리려면 `sparse_sfm_prototype.py` /
+`generate_foot_masks.py` / `clean_point_cloud.py` / `run_dense_pipeline.py`를
+개별적으로 쓸 것.
 
 **OpenMVS 별도 설치 필요**: `OPENMVS_BIN_DIR` 환경변수를 실행파일 폴더로
 설정하거나 `--openmvs-bin`으로 직접 넘길 것. 설치 방법은 README 참고.
@@ -45,8 +36,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", type=Path, required=True, help="최종 메쉬 저장 경로(.ply 등)")
     parser.add_argument(
         "--reference-length-mm", type=float, default=None,
-        help="자기신고 발길이(mm). 있으면 최종 메쉬를 이 길이에 맞춰 스케일링한다"
-             "(SfM은 절대 축척이 없음). 생략하면 250mm placeholder로 스케일링하고 경고 출력.",
+        help="자기신고 발길이(mm), 스케일 기준(SfM은 절대 축척 없음). "
+             "생략하면 250mm placeholder 사용.",
     )
     parser.add_argument("--interval", type=float, default=0.5, help="영상에서 프레임을 뽑을 간격(초)")
     parser.add_argument("--start-time", type=float, default=0.0, help="사용할 구간의 시작 시각(초)")
@@ -58,7 +49,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--min-sharpness", type=float, default=None,
         help="QC 블러 절대 임계값(라플라시안 분산). 기본 None=검사 안 함 — "
-             "scripts/inspect_frame_quality.py로 실제 영상의 선명도 분포를 보고 정할 것.",
+             "scripts/inspect_frame_quality.py로 선명도 분포 보고 정할 것.",
     )
     parser.add_argument(
         "--min-frames", type=int, default=8,
@@ -71,7 +62,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--mask-during-extraction", action="store_true",
         help="특징점 추출 단계에서도 마스크를 적용한다. 배경이 복잡/혼재할 때만 — "
-             "텍스처 있는 배경이 피사체와 함께 고정된 촬영에서는 오히려 손해였다(실측 확인).",
+             "텍스처 있는 배경이 피사체와 함께 고정된 촬영에서는 오히려 손해다.",
     )
     parser.add_argument(
         "--no-skin-refine", dest="skin_refine", action="store_false", default=True,

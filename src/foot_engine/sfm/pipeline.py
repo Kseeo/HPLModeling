@@ -1,13 +1,10 @@
-"""사진/영상 한 벌 -> dense MVS 발 메쉬. 앞선 모듈들을 한 번에 엮는 오케스트레이션.
+"""사진/영상 한 벌 -> dense MVS 발 메쉬. 앞선 모듈들을 엮는 오케스트레이션.
 
-    frame_quality.assess_frames()  — SfM 전 프레임별 절대기준 QC
-        └─ masking.generate_masks()  — sparse용(dilate=15)+dense용(dilate=0)
-              마스크를 한 번에 생성(추론 중복 방지, extra_dilations 참고).
-              발 미검출 프레임을 여기서 추가로 제외.
-                └─ reconstruction.run_sparse_sfm()
-                      └─ cleaning.clean_point_cloud()  — QA용 sparse 정리(최종 메쉬엔 안 씀)
-                      └─ dense.run_dense_pipeline()  — OpenMVS densify + 메싱 + 파편 제거
-                            └─ (선택) 스케일 보정 — geometry.measured_length() 기준
+    frame_quality.assess_frames() — 프레임 QC
+        └─ masking.generate_masks() — 마스크 생성 + 발 미검출 프레임 제외
+              └─ reconstruction.run_sparse_sfm() — sparse SfM
+                    └─ cleaning.clean_point_cloud() — QA용 정리(메쉬엔 안 씀)
+                    └─ dense.run_dense_pipeline() — dense 메쉬 생성 + 스케일 보정
 """
 
 from __future__ import annotations
@@ -98,51 +95,34 @@ def run_pipeline(
     """영상/사진 -> 발/피부 마스크 -> sparse SfM -> dense MVS -> 스케일 보정 메쉬.
 
     Args:
-        workdir: 중간 산출물(프레임, 마스크, DB, sparse/dense 복원)을 저장할 폴더.
-        out_mesh: 최종 dense 메쉬 저장 경로(.ply/.stl 등 trimesh가 지원하는 형식).
-        video / images_dir: 둘 중 하나만 지정. `video`면 프레임을 먼저 추출한다.
-        reference_length_mm: 자기신고 발길이(mm). 있으면 최종 메쉬를 이 길이에
-            맞춰 스케일링한다(SfM은 절대 축척이 없다). 없으면
-            `DEFAULT_REFERENCE_LENGTH_MM` placeholder로 스케일링하고 경고를
-            출력한다 — 진짜 mm 크기가 아니므로 실사용 전 반드시 확인할 것.
-        mask_during_extraction: 특징점 추출 단계에서도 마스크를 적용할지.
-            기본 False — 배경이 피사체와 함께 고정된 텍스처 있는 촬영에서는
-            오히려 등록률을 깎는 게 실측으로 확인됐다(`reconstruction.
-            run_sparse_sfm` docstring 참고). 배경이 복잡/혼재할 때만 True로.
-        quality_gate: SfM 전에 프레임별 절대기준 QC(`frame_quality.py` — 파일
-            손상/해상도/노출)를 적용할지. 기본 True.
-        min_sharpness: QC의 블러 절대 임계값. None(기본)이면 블러 검사는
-            건너뛴다 — `frame_quality.py` docstring 참고, 카메라마다 다른
-            선명도 스케일을 실측 없이 임의로 정하지 않았다.
-        min_frames: QC/마스킹 게이트를 통과해야 하는 최소 프레임 수. 이보다
-            적게 남으면 SfM을 돌리지 않고 `CaptureQualityError`를 던진다.
-        cluster: `cleaned_points.ply`(QA용 sparse 정리 산출물)에 DBSCAN
-            군집화를 추가로 적용할지. 최종 dense 메쉬에는 영향 없다 — dense
-            경로는 DBSCAN을 의도적으로 안 쓴다(`dense.py` docstring 3번 참고).
-        openmvs_bin / refine / postprocess_dmaps / dense_max_threads /
-        visibility_filter_threshold / grazing_filter_min_score /
-        reprojection_consistency_min_vote / free_space_support /
-        thickness_factor / quality_factor / refine_decimate /
-        refine_regularity_weight / smooth_high_curvature /
-        curvature_percentile / curvature_rings / curvature_iterations /
-        curvature_alpha / fill_holes / sand_surface_enabled /
-        prune_protrusions:
-            `dense.run_dense_pipeline()`으로 그대로 전달. 튜닝 근거는
-            `dense.py` 모듈 docstring 및 `dense_mvs_results/README.md` 참고.
-            `refine_decimate`(기본 1=해상도 보존), `smooth_high_curvature`/
-            `curvature_*`(기본 켜짐, 2026-08-12 강화), `fill_holes`/
-            `sand_surface_enabled`(기본 켜짐)는 실측 검증된 기본값이다.
-            `reprojection_consistency_min_vote`(배경 오염 제거)와 `refine`
-            (느림)은 다른 촬영본에서도 안전한지 아직 test03 1건만 검증돼
-            기본 꺼짐. free_space_support/thickness_factor는 실측에서
-            부작용(메쉬 뒤틀림)만 확인돼 기본값(꺼짐/1.0)을 건드리지 말 것.
-            `prune_protrusions`은 실행 간 편차가 커 기본 꺼짐(dense.py 참고).
-        keep_intermediates: `False`(기본)이면 성공 후 `workdir` 안의 모든
-            중간 산출물(추출 프레임, 마스크, DB, sparse 재구성, QA용 sparse
-            점군, dense MVS 스크래치)을 지운다 — 남는 건 `out_mesh` 하나뿐.
-            `run_dense_pipeline.py`로 dense 파라미터만 다시 튜닝하려면
-            이 폴더의 `images/`/`masks_dense/`/`sparse/`가 남아있어야 하므로
-            `True`로 켤 것.
+        workdir(필수): 중간 산출물 저장 폴더.
+        out_mesh(필수): 최종 메쉬 저장 경로.
+        video / images_dir(필수, 택1): video면 프레임 먼저 추출.
+        reference_length_mm(None): 자기신고 발길이(mm), 스케일 기준. 없으면
+            `DEFAULT_REFERENCE_LENGTH_MM` placeholder 사용.
+        interval(0.5): 영상 프레임 추출 간격(초).
+        start_time/end_time(0.0/None): 사용할 영상 구간.
+        quality_gate(True): SfM 전 프레임별 절대기준 QC 적용 여부.
+        min_sharpness(None): QC 블러 절대 임계값, 없으면 검사 생략.
+        min_frames(8): 이보다 적게 남으면 `CaptureQualityError`.
+        blur_keep_ratio(1.0): 선명도 상위 몇 %만 쓸지.
+        max_features/peak_threshold/ransac_max_error: SIFT/RANSAC 튜닝값.
+        mask_during_extraction(False): 특징점 추출 단계에도 마스크 적용할지.
+        skin_refine(True): MediaPipe 피부 정제(옷/장신구 제외) 여부.
+        skin_erode(8): 피부 마스크 경계 침식 폭(px).
+        mask_dilate(15): sparse용 마스크 팽창 폭(px).
+        cluster(True): QA용 `cleaned_points.ply`에 DBSCAN 적용 여부.
+        openmvs_bin(None): OpenMVS 실행파일 폴더.
+        refine(False): RefineMesh(느림) 실행 여부.
+        postprocess_dmaps/dense_max_threads/visibility_filter_threshold/
+        grazing_filter_min_score/reprojection_consistency_min_vote/
+        free_space_support/thickness_factor/quality_factor/refine_decimate/
+        refine_regularity_weight/smooth_high_curvature/curvature_percentile/
+        curvature_rings/curvature_iterations/curvature_alpha/fill_holes/
+        sand_surface_enabled/prune_protrusions: `dense.run_dense_pipeline()`으로
+            그대로 전달(각 인자 설명은 그쪽 docstring 참고).
+        keep_intermediates(False): 성공 후 중간 산출물 정리 여부. `True`면
+            `run_dense_pipeline.py`로 dense 파라미터 재튜닝 가능.
 
     Returns:
         산출물 경로와 요약 통계를 담은 `PipelineResult`.
@@ -266,12 +246,8 @@ def run_pipeline(
     # 덩어리인 메쉬에 대한 무의미한 재호출이 된다.
     mesh = trimesh.load(mesh_ply, process=False)
 
-    # 축 정렬(X=길이) + 발바닥 검출(Y=높이, 발바닥이 -Y, 접지) + 스케일링 —
-    # 템플릿이 없어져 앞/뒤(발끝 방향)는 여전히 못 정하지만, 평탄도 비대칭
-    # 휴리스틱으로 위/아래는 결정한다(`dense.align_sole_down()` docstring
-    # 참고, 2026-08-11 실측: test03에서 신호 확인됨 — 매 실행 검증된 건
-    # 아니라 실사용 전 뷰어로 확인할 것). `dense.run_dense_pipeline.py`
-    # 단독 재실행 스크립트도 같은 후처리를 쓴다(`dense.finalize_mesh()` 참고).
+    # 축 정렬(X=길이, Y=높이·발바닥은 -Y) + 스케일링 + 바닥 정착.
+    # `run_dense_pipeline.py`도 같은 후처리를 쓴다(`dense.finalize_mesh()` 참고).
     mesh, scale_factor = dense.finalize_mesh(mesh, reference_length_mm=reference_length_mm)
 
     out_mesh.parent.mkdir(parents=True, exist_ok=True)

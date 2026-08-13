@@ -48,22 +48,22 @@ def main(argv: list[str] | None = None) -> int:
         help="배경 제외용 마스크 폴더(`generate_foot_masks.py`로 미리 생성). "
              "지정하면 마스크 밖(배경) 픽셀은 특징점 추출에서 제외한다. 배경이 "
              "복잡/혼재할 때만 쓸 것 — 텍스처 있는 바닥 등 피사체와 함께 고정된 "
-             "배경에서는 오히려 등록률을 깎을 수 있다(실측 확인, run_sparse_sfm docstring 참고).",
+             "배경에서는 오히려 등록률을 깎을 수 있다(run_sparse_sfm docstring 참고).",
     )
     parser.add_argument(
         "--max-features", type=int, default=sfm.DEFAULT_MAX_FEATURES,
-        help=f"이미지당 최대 SIFT 특징점 수(기본 {sfm.DEFAULT_MAX_FEATURES} — 저텍스처 "
-             "피부 대상 실측 튜닝값, COLMAP 기본은 8192).",
+        help=f"이미지당 최대 SIFT 특징점 수(기본 {sfm.DEFAULT_MAX_FEATURES}, "
+             "COLMAP 기본은 8192 -- 저텍스처 피부 대상 튜닝값).",
     )
     parser.add_argument(
         "--peak-threshold", type=float, default=sfm.DEFAULT_PEAK_THRESHOLD,
         help=f"SIFT 특징점 채택 임계값, 낮을수록 약한 특징점까지 채택(기본 "
-             f"{sfm.DEFAULT_PEAK_THRESHOLD} — 실측 튜닝값, COLMAP 기본은 0.00667).",
+             f"{sfm.DEFAULT_PEAK_THRESHOLD}, COLMAP 기본은 0.00667).",
     )
     parser.add_argument(
         "--ransac-threshold", type=float, default=sfm.DEFAULT_RANSAC_MAX_ERROR,
         help=f"매칭 기하 검증(RANSAC) 인라이어 허용 오차, px 단위(기본 "
-             f"{sfm.DEFAULT_RANSAC_MAX_ERROR} — 실측 튜닝값, COLMAP 기본은 4.0). 낮출수록 "
+             f"{sfm.DEFAULT_RANSAC_MAX_ERROR}, COLMAP 기본은 4.0). 낮출수록 "
              "엄격해져 재투영 오차가 줄어든다.",
     )
     args = parser.parse_args(argv)

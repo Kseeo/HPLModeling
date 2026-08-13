@@ -1,79 +1,32 @@
 """Sparse SfM 결과 기반 OpenMVS Dense 포인트클라우드/메쉬 복원 모듈.
 
-메쉬 생성기 본체(2026-08-11부터, 템플릿 워프/SSM 대신 이 모듈이 만드는 dense
-메쉬를 다듬고 경량화하는 쪽으로 결론남 — `archive/deformer_ssm_pipeline/`
-참고). OpenMVS CLI 실행파일이 필요하며(`OPENMVS_BIN_DIR` 설정), CUDA 없이
-CPU 빌드로 동작합니다.
+OpenMVS CLI 실행파일 필요(`OPENMVS_BIN_DIR`), CPU 빌드로 동작.
 
-파이프라인 흐름:
+흐름:
     undistort_for_dense() -> convert_masks_for_openmvs() -> run_interface_colmap()
-    -> run_densify_point_cloud() -> clean_dense_point_cloud() (선택: prune_protrusions)
-    -> (선택) filter_by_reprojection_consistency() -> (선택) filter_grazing_points()
-    -> (선택) filter_point_cloud_visibility() -> restore_point_cloud_views()
-    -> run_reconstruct_mesh() -> run_refine_mesh() (선택) -> keep_largest_component()
-    -> (선택) fill_small_holes() -> (선택) sand_surface() -> smooth_high_curvature_regions() (기본 켜짐)
+    -> run_densify_point_cloud() -> clean_dense_point_cloud()
+    -> (선택) filter_by_reprojection_consistency()/filter_grazing_points()/
+       filter_point_cloud_visibility()+restore_point_cloud_views()
+    -> run_reconstruct_mesh() -> (선택) run_refine_mesh() -> keep_largest_component()
+    -> (선택) fill_small_holes()/sand_surface() -> smooth_high_curvature_regions()
 
-주요 실측 결과 및 구현 규칙:
-1. 마스크 처리: 배경 누출 방지를 위해 densify 이전에 마스크를 적용하며, dilate=0으로 설정합니다.
-2. 노이즈 제거: DBSCAN은 발바닥 등 성긴 진짜 점을 삭제하므로 통계적 이상치 제거만 사용합니다.
-   실루엣 경계 노이즈를 겨냥한 "합의를 더 엄격히 요구" 계열 파라미터
-   (`--number-views-fuse`, fusion 임계값들)도 같은 이유로 부적합함을 실측
-   확인(2026-08-11, test03) — 경계는 94.9~98.7% 그대로 남는데 발바닥은
-   32~53%만 남아 오히려 역효과. 상세: `data/output/dense_mvs_results/README.md`.
-3. 메쉬 생성: 형태 보존을 위해 스무딩을 OFF(`--smooth 0`)하며, 크래시 방지를 위해 멀티스레드 수를 제한합니다.
-   생성 후 부유 파편은 최대 연결 요소만 남겨 제거합니다.
-4. 축 정렬: 길이축(PCA 최대분산) 주변을 제외한 모든 방향을 검사해 접점(바닥 접촉
-   후보점)이 가장 많은 방향을 발바닥(-Y)으로 정렬합니다(`find_sole_direction()`).
-5. 가시성 필터(`filter_point_cloud_visibility()`)는 기본 꺼짐이지만 이제 안전하게
-   쓸 수 있습니다 — OpenMVS 자신의 필터 내보내기가 view 필드를 지워
-   `ReconstructMesh`를 크래시시키던 문제를 `restore_point_cloud_views()`로
-   고쳤습니다(2026-08-11 test03 실측: threshold=-1 기준 발바닥 100% 보존,
-   경계 근방 94.7% vs 내부 97.6% 유지 — 효과는 작지만 sole 손상 없이 방향은
-   맞음). `run_dense_pipeline(visibility_filter_threshold=...)`로 켤 것.
-6. 배경 오염(2D 마스크 오분류, 예: 의자를 사람으로 오분류) 제거용으로
-   `filter_by_reprojection_consistency()`를 만들었으나(카메라 전부에
-   재투영해 마스크 다수결 판정), **일반적으로 켜는 걸 권장하지 않는다**
-   (2026-08-13 실측: test00 발등, test03 발뒤꿈치가 낮은 ratio(0.2)에서도
-   통째로 사라짐 — 배경 오염은 근접 각도 여러 프레임이 "일관되게 같은
-   실수"를 해 표결에서 오히려 잘 살아남는 반면, 발뒤꿈치/발등은 원래
-   관측 카메라 수 자체가 적어 어떤 ratio에서도 표가 안 모인다. 2026-08-11
-   test03에서 배경 제거가 확인됐던 건 우연히 그 케이스에서만 맞아떨어진
-   결과로 보임 — ratio를 조정해도 해결 안 될 구조적 한계, 기본 꺼짐 유지).
-7. `RefineMesh`의 `decimate` 기본값을 1(단순화 끔)로 바꿨습니다 — OpenMVS
-   자체 기본값(0=auto)은 해상도를 크게 깎아 뭉툭해집니다. 대신 관측 부족
-   부위에 남는 크레이터형 결함은 `smooth_high_curvature_regions()`(기본
-   켜짐)로 완화합니다 — 노이즈와 진짜 굴곡을 주파수로만 구분해 발가락
-   사이 등 디테일도 함께 뭉개지는 트레이드오프가 있습니다(원리적 한계,
-   국소 이차곡면 피팅으로도 안 풀림 — 상세 `dense_mvs_results/README.md`).
-8. 중간 산출물(undistort된 COLMAP dense 워크스페이스, depth map 수십~수백MB,
-   RefineMesh 반복 단계별 메쉬 등)은 기본적으로 남기지 않습니다 — 완료 시
-   `<workdir>/mesh.ply` 하나만 남기고 나머지는 정리합니다. 디버깅/로깅
-   목적으로 전부 보존하려면 `keep_intermediates=True`.
-9. 2026-08-12 추가, 둘 다 기본 꺼짐(실측 검증 전): `fill_small_holes()`는
-   작은 구멍(핀홀)만 크기 필터로 골라 메웁니다(발바닥 등 큰 구멍은
-   그대로 둠). `sand_surface()`는 곡률 임계값 없이 전체 정점을 국소
-   이차곡면에 투영해 다듬는 일반 노이즈 완화 단계입니다 -- 7번의 크레이터
-   완화(곡률 상위만 대상)와는 별개이며, 크레이터 자체는 이 방식으로도
-   못 없앤다는 원리적 한계가 그대로 적용됩니다(이웃들의 이차곡면 추세
-   자체가 왜곡돼 있어서). 둘 다 폴리곤(정점/면) 개수는 그대로입니다.
-10. `clean_dense_point_cloud(prune_protrusions=True)`(기본 꺼짐)는 뒤꿈치
-    뿔 결함을 겨냥한 대책이지만, 판정이 그 실행의 점군 분포에 대한
-    **상대적** 기준(밀도 중앙값 대비 비율, 거리 percentile)이라 SfM/MVS
-    재구성 자체의 실행 간 편차만으로 얼마나 지워지는지가 크게 흔들린다
-    (실측: test03 동일 영상 재실행 두 번에서 3.3% vs 18.8% 제거 -- 후자는
-    진짜 표면까지 지워 디테일이 뭉개짐). `max_protrusion_ratio`(기본 8%)
-    안전장치로 폭주 시 이번 실행은 통째로 건너뛰지만, 근본적으로 실행마다
-    결과가 달라질 수 있다는 뜻이라 기본값을 켜는 건 아직 시기상조.
+기본값 메모:
+- 마스크는 dilate=0으로 densify 전에 적용.
+- 이상치 제거는 통계적 방식만(DBSCAN·fusion 합의 강도는 안 씀 — 성긴 진짜
+  표면까지 지움).
+- 메쉬 생성은 스무딩 OFF, 최대 연결 요소만 유지.
+- 축 정렬은 `find_sole_direction()` — 접점이 가장 많은 방향을 발바닥(-Y)으로.
+- `filter_by_reprojection_consistency()`는 켜지 말 것 — 관측 카메라가 적은
+  부위(발등/발뒤꿈치 등)를 통째로 지울 수 있다.
+- `RefineMesh`는 `decimate=1`(단순화 끔) 기본.
+- 중간 산출물은 기본 정리(`keep_intermediates=True`로 보존).
+- `prune_protrusions`은 실행마다 결과가 흔들려 기본 꺼짐.
 
 알려진 한계:
-- 발바닥 미촬영 프로토콜 특성상 접지면에 큰 구멍(30%대)이 남습니다.
-- 발목 부근의 뿔/스파이크 형태 돌출부 결함은 완전히 제거되지 않고 유지됩니다.
-- 실루엣 경계의 MVS 깊이 노이즈(flying pixel)는 위 5번으로 일부만 완화되며
-  근본 해결책은 아닙니다 — occlusion 경계에서 여러 뷰가 체계적으로 같은
-  값에 "합의"하는 편향이라 다수결/합의 강도 기반 필터로는 원리적 한계가 있음.
-- 오목 부위(아치/뒤꿈치 굴곡) 크레이터는 관측 부족으로 생기는 저주파
-  왜곡이라 후처리로 원리적 해결이 불가능합니다 — 촬영 단계에서 보완 촬영
-  필요(위 7번 참고).
+- 발바닥 미촬영 프로토콜 특성상 접지면에 큰 구멍이 남는다.
+- 발목 부근 뿔/스파이크 결함이 남을 수 있다.
+- 실루엣 경계 깊이 노이즈(flying pixel)가 완전히 제거되지 않는다.
+- 오목 부위(아치/뒤꿈치)에 관측 부족 크레이터가 남을 수 있다.
 """
 
 from __future__ import annotations
@@ -97,17 +50,14 @@ from .reconstruction import filter_outlier_points
 #: OpenMVS CLI 실행파일이 있는 폴더. 환경변수로 덮어쓸 것 -- 설치 방법은 README 참고.
 DEFAULT_OPENMVS_BIN_DIR = os.environ.get("OPENMVS_BIN_DIR", "")
 
-#: `DensifyPointCloud`의 간헐적 네이티브 크래시(원인 불명, 멀티스레드 경쟁
-#: 상태로 추정) 재현을 막기 위한 기본 스레드 상한. 실측: 8로 낮추면 두 차례
-#: 재현된 크래시(ACCESS_VIOLATION, 힙 손상)가 재발하지 않았다.
+#: `DensifyPointCloud`의 간헐적 네이티브 크래시를 피하기 위한 스레드 상한.
 DEFAULT_MAX_THREADS = 8
 
 #: `--postprocess-dmaps` 비트마스크: 1=remove-speckles, 2=fill-gaps.
-#: 저텍스처 평면(발등/발바닥)의 깊이 추정 공백을 일부 메운다(실측: 점 13.8%↑).
+#: 저텍스처 평면(발등/발바닥)의 깊이 추정 공백을 일부 메운다.
 DEFAULT_POSTPROCESS_DMAPS = 3
 
-#: `smooth_high_curvature_regions()` 기본 강도 -- 2026-08-12 렌더 비교로
-#: 90/5/10/0.6에서 이 값으로 올림(표면 노이즈 확실히 줄고 실루엣은 유지됨).
+#: `smooth_high_curvature_regions()` 기본 강도(곡률 백분위 임계값).
 DEFAULT_CURVATURE_PERCENTILE = 60.0
 DEFAULT_CURVATURE_RINGS = 6
 DEFAULT_CURVATURE_ITERATIONS = 15
@@ -136,9 +86,7 @@ def _resolve_openmvs_bin(openmvs_bin: str | Path | None) -> Path:
 def largest_sparse_dir(sparse_root: Path) -> Path:
     """`sparse/0`, `sparse/1`, ... 중 등록 이미지가 가장 많은 폴더를 찾는다.
 
-    번호가 항상 크기순은 아니다(실측 확인: 어떤 촬영에서는 `sparse/1`이
-    108장, `sparse/0`은 2장짜리 파편이었다) -- `sparse/0`을 무조건 가정하면
-    안 된다.
+    번호가 항상 크기순은 아니므로 `sparse/0`을 무조건 가정하면 안 된다.
     """
     best_dir, best_n = None, -1
     for d in sorted(sparse_root.iterdir()):
@@ -159,8 +107,8 @@ def undistort_for_dense(sparse_dir: Path, images_dir: Path, output_dir: Path) ->
     """sparse 카메라를 PINHOLE(왜곡보정)로 바꿔 OpenMVS가 기대하는 COLMAP dense
     워크스페이스(`images/`, `sparse/`, `stereo/`)를 만든다.
 
-    `pycolmap.undistort_images()`로 처리한다 -- 별도 `colmap.exe` 실행파일 없이도
-    된다(실측 확인).
+    `pycolmap.undistort_images()`로 처리한다 -- 별도 `colmap.exe` 실행파일이
+    필요 없다.
     """
     output_dir.mkdir(parents=True, exist_ok=True)  # pycolmap이 상위 폴더까지는 안 만들어줌
     pycolmap.undistort_images(
@@ -240,12 +188,11 @@ def run_densify_point_cloud(
 
     Args:
         masks_dir: `convert_masks_for_openmvs()`로 변환된(=`.mask.png`
-            규칙) 마스크 폴더. 지정하면 배경 픽셀에서는 깊이 계산 자체를
-            생략한다 -- 사후 필터링보다 근본적인 배경 제거(실측 확인:
-            raw depth 계산량이 정확히 절반으로 줆). `masking.generate_masks()`를
-            `dilate=0`으로 호출해 만들 것(모듈 docstring 2번 참고).
+            규칙) 마스크 폴더. 지정하면 배경 픽셀은 깊이 계산 자체를
+            생략한다. `masking.generate_masks()`를 `dilate=0`으로 호출해
+            만들 것.
         postprocess_dmaps: 기본 3(remove-speckles+fill-gaps). 저텍스처 평면
-            깊이 공백을 메운다(모듈 docstring 6번 참고). 0이면 비활성.
+            깊이 공백을 메운다. 0이면 비활성.
     """
     bin_dir = _resolve_openmvs_bin(openmvs_bin)
     args = [scene_mvs.name, "-o", output_name, "--max-threads", str(max_threads)]
@@ -323,9 +270,7 @@ def filter_grazing_points(
     """표면 법선이 관측 카메라 시선과 거의 접선(grazing)인 점을 제거한다.
 
     occlusion 경계의 "flying pixel" 노이즈를 겨냥한 필터 — 어느 카메라에서
-    봐도 표면이 옆으로 누워 보이는 점을 지운다. 경계 노이즈 제거 효과는
-    미검증(육안 확인 필요, `dense_mvs_results/README.md` 참고), 발바닥은
-    안 건드린다는 것만 실측 확인됨.
+    봐도 표면이 옆으로 누워 보이는 점을 지운다.
 
     Args:
         dense_ply_path: view_indices/view_weights/normal 필드가 있는 dense PLY.
@@ -387,14 +332,8 @@ def filter_by_reprojection_consistency(
     Args:
         masks_dir: `masking.generate_masks()` 원본 마스크 폴더(OpenMVS 변환
             전, `<원본파일명>.png`).
-        min_vote_ratio: 이 미만이면 제거(0~1). **주의**: "발 오제거 11%"
-            같은 평균 수치는 오해를 부른다 -- 실측(2026-08-13, test00/03)
-            결과 손실이 전체에 고르게 분산되지 않고 관측 카메라 수가 적은
-            특정 부위(발등/발뒤꿈치)에 집중돼, 낮은 ratio(0.2)에서도 그
-            부위가 통째로 날아갈 수 있다. 배경 오염은 근접 각도 여러
-            프레임이 같은 실수를 공유해 표결에서 오히려 잘 살아남는 반면
-            그 부위는 원래 표가 적어서다 -- ratio 조정으로 해결되는
-            문제가 아니므로 일반적으로 켜지 말 것.
+        min_vote_ratio: 이 미만이면 제거(0~1). 관측 카메라 수가 적은 부위
+            (발등/발뒤꿈치 등)를 통째로 지울 수 있다 -- 일반적으로 켜지 말 것.
 
     Returns:
         (원본 점 개수, 유지된 점 개수).
@@ -459,24 +398,16 @@ def clean_dense_point_cloud(
     """dense 포인트클라우드에서 통계적 이상치를 제거한다 (DBSCAN 사용 안 함).
 
     view_indices/view_weights 필드를 원본 바이트 그대로 보존해야 하는 이유는
-    `_parse_dense_ply()` 참고. DBSCAN(최대 군집 유지)은 의도적으로 안 쓴다
-    -- 모듈 docstring 3번 참고
+    `_parse_dense_ply()` 참고. DBSCAN(최대 군집 유지)은 의도적으로 안 쓴다.
+
     Args:
-        prune_protrusions: 위 경고 참고. 켜려면 `density_ratio`/`far_percentile`을
-            대상 점군 규모에서 직접 검증한 뒤 켤 것 -- 기본은 꺼짐.
-            `_protrusion_remove_mask()`의 "얇음"/"멀음" 판정이 그 점군
-            자체의 상대적 분포 기준이라, SfM/MVS 재구성의 실행 간 편차
-            (같은 영상도 매번 점 수/밀도 분포가 조금씩 다름 -- 멀티스레드
-            스테레오 매칭이 원인)만으로 얼마나 지워지는지가 실측으로 확
-            연히 갈렸다: test03 동일 영상 재실행 두 번에서 각각 3.3%
-            (6,434점, 뒤꿈치 뿔 결함 완화 확인)와 18.8%(34,833점, 진짜
-            표면까지 대거 삭제돼 디테일이 뭉개짐)가 나왔다. 아래
-            `max_protrusion_ratio` 안전장치로 후자 같은 폭주를 막는다.
+        prune_protrusions: 국소 밀도 기준으로 뿔/스파이크 후보 점을 미리
+            지운다. 판정 기준(`_protrusion_remove_mask()`)이 그 점군 자체의
+            상대적 분포라서, SfM/MVS 재구성의 실행 간 편차만으로 얼마나
+            지워지는지 크게 흔들린다 -- 기본 꺼짐.
         max_protrusion_ratio: `prune_protrusions`가 이 비율보다 많은 점을
-            지우려 하면 실행 간 편차로 판정 기준 자체가 흔들린 것으로
-            보고 이번 실행에서는 통째로 건너뛴다(`cleaning.py`의
-            `max_plane_ratio`와 같은 패턴 -- 임계값이 잘못 커져 피사체까지
-            잘라내는 사고를 막는 안전장치).
+            지우려 하면 판정 기준 자체가 흔들린 것으로 보고 이번 실행에서는
+            통째로 건너뛴다(`cleaning.py`의 `max_plane_ratio`와 같은 패턴).
 
     Returns:
         (원본 점 개수, 정리 후 점 개수).
@@ -531,12 +462,9 @@ def run_reconstruct_mesh(
     """Delaunay 사면체화 + 그래프컷으로 점군을 메쉬로 만든다.
 
     Args:
-        smooth: 기본 0(끔). OpenMVS 기본값(2)이 형상 정교함을 깎아낸다는
-            육안 확인 있음(모듈 docstring 5번 참고) -- raw 메쉬가 더 정확했다.
+        smooth: 기본 0(끔) -- OpenMVS 기본값(2)은 형상 정교함을 깎아낸다.
         free_space_support / thickness_factor / quality_factor: 그래프컷
-            가중치 튜닝(모듈 docstring 13번 참고) -- 기본값은 OpenMVS 자체
-            기본값 그대로(꺼짐/1.0), 아직 실측 검증 전이라 파이프라인
-            기본 경로는 안 건드린다.
+            가중치 튜닝. 기본값은 OpenMVS 자체 기본값 그대로(꺼짐/1.0).
     """
     bin_dir = _resolve_openmvs_bin(openmvs_bin)
     args = [
@@ -649,15 +577,13 @@ def run_refine_mesh(
 ) -> Path:
     """사진 광도일관성 기반으로 메쉬 정점 위치를 보정한다 (선택적, 가장 느린 단계).
 
-    CPU로도 동작한다(`--cuda-device` 기본값 -2). 노이즈/뿔 형태 결함을
-    실제로 줄이는 효과가 육안 확인됐지만, 전체 파이프라인 소요시간의
-    70~72%를 차지하는 압도적 병목이다(실측: 1.5~9분) -- 빠른 반복
-    실험에서는 건너뛸 것.
+    CPU로도 동작한다(`--cuda-device` 기본값 -2). 전체 파이프라인 소요시간의
+    대부분을 차지하는 병목이다 -- 빠른 반복 실험에서는 건너뛸 것.
 
     Args:
         decimate: refine 전 입력 메쉬 단순화 정도(0~1). OpenMVS 기본값 0은
-            "auto"로 공격적으로 단순화한다(실측: 123,477 -> 17,478 faces) --
-            이 함수 기본값은 1(단순화 끔, 해상도 보존).
+            "auto"로 공격적으로 단순화한다 -- 이 함수 기본값은 1(단순화 끔,
+            해상도 보존).
         regularity_weight: photo-consistency 대 표면 정규화(smoothness) 항
             가중치. `None`이면 OpenMVS 기본값(0.2) 사용.
     """
@@ -733,23 +659,17 @@ def prune_thin_protrusions(
     far_percentile: float = 97.0,
     density_ratio: float = 0.6,
 ) -> tuple[trimesh.Trimesh, int]:
-    """몸통에 이어져(fused) 붙은 뿔/스파이크를 통째로 잘라낸다(모듈 docstring 11번).
+    """몸통에 이어져(fused) 붙은 뿔/스파이크를 통째로 잘라낸다.
 
     `keep_largest_component()`는 이미 분리된 파편만 잡는다 -- 뿔은 몸통과
-    같은 연결 요소라 무력하다. 거리 percentile 컷만으로는 뿔의 끝부분만
-    잘리고 몸통에 이어진 뿌리는 남는다(실측 확인). 대신 "뿔은 국소 정점
-    밀도가 몸통보다 뚜렷이 낮다"는 걸 핵심 단서로 쓴다 -- 얇고 길쭉한
-    구조라 단위 부피당 정점 수가 적다:
+    같은 연결 요소라 무력하다. 대신 "뿔은 국소 정점 밀도가 몸통보다
+    뚜렷이 낮다"는 걸 핵심 단서로 쓴다 -- 얇고 길쭉한 구조라 단위
+    부피당 정점 수가 적다:
 
         1. 각 정점의 반경 `density_radius_nn_mult * 전형적 10-최근접 간격`
-           안 이웃 수(밀도) 계산 -- PCA 기반 `measured_length()`나 중심
-           거리 같은 "물리적 크기" 척도는 안 쓴다. 전자는 뿔 자체가 축을
-           왜곡시키는 순환 참조 문제가 있고(모듈 docstring 11번), 후자는
-           실측해보니 점 밀도 분포(중심 근처에 몰림)에 좌우돼 반경이
-           지나치게 작아지는 문제가 있었다(실측: median 정점간 거리
-           기준으로 반경을 잡으니 밀도 median이 1.0으로 무너짐) --
-           메쉬 해상도(정점 간격)에 비례하는 반경이라야 정점 수/전체
-           크기가 달라져도 "밀도" 수치가 일관된 의미를 가진다.
+           안 이웃 수(밀도) 계산 -- 메쉬 해상도(정점 간격)에 비례하는
+           반경이라야 정점 수/전체 크기가 달라져도 "밀도" 수치가 일관된
+           의미를 가진다.
         2. 밀도가 전체 중앙값의 `density_ratio` 미만인 정점을 "얇음"으로 표시.
         3. 중심에서 먼 상위 `far_percentile`% 정점을 뿔 후보 씨앗으로 표시.
         4. "얇음" 정점들만으로 메쉬 인접 그래프의 연결 요소를 구하고, 씨앗과
@@ -776,10 +696,10 @@ def keep_largest_component(mesh: trimesh.Trimesh) -> tuple[trimesh.Trimesh, int,
     """면(face) 기준 가장 큰 연결 요소만 남기고 부유 파편을 지운다.
 
     `ReconstructMesh` 출력은 보통 발 하나가 98%+를 차지하는 단일 덩어리이고,
-    나머지는 배경에서 떨어져 나온 작은 파편이다(모듈 docstring 10번 참고).
-    이미 공간적으로 분리된 덩어리 단위로만 자르므로, 3번 항목의 DBSCAN
-    버그(성긴 진짜 부위를 노이즈로 오판)와 달리 안전하다 -- 다만 발 표면에
-    이어져(fused) 붙은 경계 노이즈는 같은 덩어리라 이걸로 안 떨어진다.
+    나머지는 배경에서 떨어져 나온 작은 파편이다. 이미 공간적으로 분리된
+    덩어리 단위로만 자르므로 DBSCAN(성긴 진짜 부위를 노이즈로 오판)과 달리
+    안전하다 -- 다만 발 표면에 이어져(fused) 붙은 경계 노이즈는 같은
+    덩어리라 이걸로 안 떨어진다.
 
     Returns:
         (필터링된 메쉬, 원본 face 수, 남은 face 수).
@@ -865,9 +785,7 @@ def _ring_neighbors_padded(
     공간(유클리드) 최근접이 아니라 메쉬 표면을 따라간 위상 인접을 쓴다 --
     발처럼 접힌/오목한 형태에서는 공간적으로 가까워도 표면상으로는 먼 두
     지점(예: 발목 반대쪽, 발가락 사이)이 유클리드 최근접 이웃으로 섞여
-    들어가 국소 곡면 피팅을 망가뜨리는 것을 실측으로 확인했다(사포질을
-    실제 발 메쉬에 적용하니 곡률이 줄기는커녕 오히려 늘어남 -- 공간
-    최근접 방식으로는 원리적으로 못 피함, k-ring으로 전환 후 해결).
+    들어가 국소 곡면 피팅을 망가뜨린다.
 
     Returns:
         (idx_padded, mask) -- 둘 다 (n, max_neighbors) 모양. `mask`가
@@ -914,22 +832,19 @@ def sand_surface(
     않고 전체 정점에 균일하게 적용한다 -- 발 전체를 다듬는 일반 노이즈
     완화용이며, 정점/면 개수·위상은 그대로다(폴리곤 감소 없음).
 
-    구현 노트(둘 다 실측으로 확인된 안전장치):
+    구현 노트:
     - 이웃은 공간(유클리드) 최근접이 아니라 위상(표면) 인접이다 --
-      `_ring_neighbors_padded()` docstring 참고, 공간 최근접은 접힌 형태
-      에서 표면상 먼 지점을 섞어 오히려 곡률을 늘렸다.
+      `_ring_neighbors_padded()` docstring 참고.
     - 이웃 좌표(u, w)는 피팅 전에 국소 이웃 거리 스케일로 정규화한다 --
       정규화 없이는 좌표 스케일에 따라 정규방정식(AᵀA) 조건수가 나빠져
-      일부 정점의 피팅이 극단값으로 튐(합성 구 테스트: 정규화 전 3회
-      반복 후 최대 오프셋이 반경의 180배로 발산). 그래도 남는 이상치에
-      대비해 `max_offset_ratio`로 오프셋을 국소 스케일의 배수로 clamp한다.
+      일부 정점의 피팅이 극단값으로 튄다. 남는 이상치에 대비해
+      `max_offset_ratio`로 오프셋을 국소 스케일의 배수로 clamp한다.
 
     한계: 관측 부족으로 생긴 오목 부위(아치/뒤꿈치) 크레이터처럼 이웃
-    전체가 같은 방향으로 치우친 "매끄러운" 저주파 왜곡은 이웃들의 이차곡면
-    추세 자체가 이미 왜곡돼 있어 이 방식으로도 못 없앤다(실측 확인,
-    `dense_mvs_results/README.md` "국소 이차곡면 피팅 시도" 절 참고) --
-    크레이터 완화는 여전히 `smooth_high_curvature_regions()` 몫이고, 이
-    함수는 그것과 별개로 전반적인 표면 노이즈를 줄이는 보완 단계다.
+    전체가 같은 방향으로 치우친 저주파 왜곡은 이웃들의 이차곡면 추세
+    자체가 이미 왜곡돼 있어 이 방식으로도 못 없앤다 -- 크레이터 완화는
+    여전히 `smooth_high_curvature_regions()` 몫이고, 이 함수는 그것과
+    별개로 전반적인 표면 노이즈를 줄이는 보완 단계다.
 
     Args:
         min_neighbors: 국소 곡면 피팅에 쓸 최소 이웃 수 -- 이차곡면
@@ -1000,9 +915,8 @@ def smooth_high_curvature_regions(
     """곡률이 튀는 정점과 그 주변 링만 라플라시안으로 스무딩한다. 나머지
     정점은 그대로 둔다.
 
-    관측 부족으로 생긴 크레이터형 결함 완화용(실측 확인) -- 노이즈와 진짜
-    굴곡을 구분하지 못해 발가락 사이 같은 진짜 디테일도 함께 뭉개진다.
-    받아들이기로 한 트레이드오프 -- `dense_mvs_results/README.md` 참고.
+    관측 부족으로 생긴 크레이터형 결함 완화용 -- 노이즈와 진짜 굴곡을
+    구분하지 못해 발가락 사이 같은 진짜 디테일도 함께 뭉개진다.
 
     Args:
         curvature_percentile: 이 백분위 이상 |곡률|인 정점을 코어로 삼는다.
@@ -1086,28 +1000,15 @@ def find_sole_direction(
     max_sample_points: int = 20_000,
     rng: np.random.Generator | None = None,
 ) -> np.ndarray:
-    """모든 방향을 검사해, 그 방향으로 투영했을 때 접지면 근방(최솟값 부근)에
-    점이 가장 많이 몰리는 방향을 발바닥(아래) 방향으로 고른다.
+    """구 위의 모든 방향을 검사해, 그 방향으로 투영했을 때 최솟값 근방에
+    점이 가장 많이 몰리는(=접지면 후보) 방향을 발바닥(아래) 방향으로 고른다.
 
-    이전 버전은 PCA 분산 순위로 정한 두 후보 축(축1/축2) 중 평탄도
-    비대칭이 큰 쪽만 골랐는데, 실측(test03, 2026-08-11)에서 분산 순위가
-    실제 길이/너비/높이 순서와 어긋나는 경우가 있어 후보 자체가 틀릴 수
-    있었다. 대신 여기서는 구 위 `n_directions`개 방향 전부에 대해 "그
-    방향 최솟값에서 `contact_band_ratio`(발 크기 대비 비율) 이내에 점이
-    몇 개인가"를 직접 세어(=바닥에 닿는 접점 수) 가장 많은 방향을 고른다
-    -- 어느 두 축에도 갇히지 않는다.
-
-    다만 완전히 전 방향(구 전체)을 열어두면 발목 절단면처럼 촬영/메쉬
-    구멍 메움으로 생긴 인위적인 평면이 발바닥보다 더 넓고 평평하게 잡혀
-    잘못 고를 위험이 있다 -- 발바닥 방향은 발 길이축과 대략 수직이라는
-    사전 지식(`align_principal_axes()` 등에서도 써 온 가정)으로 길이축
-    기준 `exclude_cone_deg` 이내(발끝/발목 쪽) 방향은 후보에서 제외한다.
+    길이축(`length_axis`) 기준 `exclude_cone_deg` 이내(발끝/발목 쪽)
+    방향은 후보에서 제외한다 -- 발바닥은 길이축과 대략 수직이라는 가정.
 
     Args:
-        centered_vertices: 중심이 원점으로 이동된 정점 좌표(정렬 전 원본
-            축 기준이어도 무방 -- 방향 자체를 구 전체에서 찾는다).
-        length_axis: 발 길이 방향 단위벡터(원뿔 제외 기준). 보통 PCA
-            최대분산 축.
+        centered_vertices: 중심이 원점으로 이동된 정점 좌표.
+        length_axis: 발 길이 방향 단위벡터(원뿔 제외 기준).
         contact_band_ratio: 접점으로 칠 허용 오차 -- bounding diagonal 대비
             비율.
 
@@ -1151,13 +1052,7 @@ def align_sole_down(
     """`align_principal_axes()`의 다음 단계 -- 발바닥까지 검출해 최종 좌표계를
     X=길이축, Y=높이축(발바닥이 -Y), Z=너비축으로 맞춘다(중심은 원점).
 
-    `find_sole_direction()`(위 참고)으로 모든 방향을 검사해 접점(바닥 접촉
-    후보점)이 가장 많은 방향을 발바닥으로 고른다. **주의**: 지금 촬영
-    프로토콜은 발바닥을 직접 못 찍어(모듈 상단 "알려진 한계" 참고) 그
-    부위 표면이 그래프컷이 메운 결과일 수 있다 -- 그래도 실측 확인
-    (test03, 2026-08-11)해보니 발바닥 쪽이 발등/발목 쪽보다 뚜렷이 더
-    평평하게 나와 이 휴리스틱이 신호를 잡아낸다. 다만 매 실행마다
-    검증된 건 아니므로, 최종 산출물에 쓰기 전 실제 뷰어로 확인할 것.
+    `find_sole_direction()`(위 참고)으로 발바닥 방향을 고른다.
     """
     centroid = mesh.vertices.mean(axis=0)
     c = mesh.vertices - centroid
@@ -1202,10 +1097,7 @@ def finalize_mesh(
     """`run_dense_pipeline()`이 만든 원본 메쉬(임의 좌표계/임의 스케일)를
     축 정렬 + 스케일링 + 바닥 정착까지 마친 최종 메쉬로 만든다.
 
-    `run_pipeline()`과 `run_dense_pipeline.py`(sparse 재계산 없이 dense만
-    다시 돌리는 단독 스크립트) 양쪽이 이 함수를 공유한다 -- 전에는 이
-    후처리가 `run_pipeline()` 안에만 있어, 단독 스크립트로 만든 메쉬는
-    정렬/접지가 안 된 채로 나갔다.
+    `run_pipeline()`과 `run_dense_pipeline.py`가 공유한다.
 
     Returns:
         (정렬/스케일/접지 완료된 메쉬, 적용된 스케일 배율)
@@ -1262,58 +1154,22 @@ def run_dense_pipeline(
     """위 단계 전부를 엮는 오케스트레이션. 최종 메쉬 경로를 반환한다.
 
     Args:
-        sparse_dir: `reconstruction.run_sparse_sfm()`이 만든 sparse 재구성
-            폴더(예: `<workdir>/sparse/0`). 폴더 번호가 가장 큰 것이라는
-            보장이 없으면 `largest_sparse_dir()`로 먼저 확인할 것.
-        masks_dir: `masking.generate_masks(..., dilate=0)`로 만든 마스크
-            폴더 (dilate 값이 커지면 배경 경계 노이즈가 늘어난다 -- 모듈
-            docstring 2번 참고).
-        refine: RefineMesh(사진 광도일관성 보정)까지 돌릴지. 기본 False --
-            전체 시간의 70% 이상을 차지하는 병목이라(모듈 docstring 7번),
-            빠른 확인이 필요하면 끄고 최종 산출물만 켤 것.
-        visibility_filter_threshold: `filter_point_cloud_visibility()` +
-            `restore_point_cloud_views()`를 추가로 돌릴지. `None`(기본)이면
-            안 돌림 -- 경계 노이즈에 실제로 도움이 되는지는 아직 test03
-            1건만 크래시 없이 확인됐고 결과 품질(제거되는 게 진짜 경계
-            노이즈인지, 발바닥처럼 성긴 진짜 표면까지 깎이는지)은 미검증.
-            음수 값(예: -1)을 주면 활성화.
-        grazing_filter_min_score: `filter_grazing_points()`를 추가로 돌릴지
-            (`min_score` 값으로 그대로 전달). `None`(기본)이면 안 돌림 --
-            켜면 `visibility_filter_threshold`보다 먼저(더 안쪽 단계에서)
-            적용된다. 그 함수 docstring의 "주의" 참고 -- 발바닥 보존은
-            확인됐지만 경계 노이즈 제거 효과 자체는 육안 확인 필요.
-        reprojection_consistency_min_vote: `filter_by_reprojection_consistency()`를
-            추가로 돌릴지. `None`(기본)이면 안 돌림 -- 켜면 grazing/visibility
-            필터보다 먼저(가장 안쪽 단계에서) 적용된다. 실측(test03, 의자
-            오염): 0.6에서 오염 후보 44% 제거/발 오제거 11%.
-        free_space_support / thickness_factor / quality_factor:
-            `run_reconstruct_mesh()`로 그대로 전달(모듈 docstring 13번 참고).
-            아직 실측 검증 전이라 기본값은 OpenMVS 기본값 그대로.
-        refine_decimate / refine_regularity_weight: `refine=True`일 때
-            `run_refine_mesh()`로 그대로 전달.
-        smooth_high_curvature: `smooth_high_curvature_regions()`를 돌릴지.
-            기본 True. `curvature_percentile`/`curvature_rings`/
-            `curvature_iterations`/`curvature_alpha`로 강도 조절(그대로
-            `smooth_high_curvature_regions()`에 전달) -- 2026-08-12 렌더
-            비교로 기본값을 90/5/10/0.6 -> 60/6/15/0.7로 올림(표면 노이즈
-            더 확실히 죽음, 발 전체 실루엣은 유지되는 것 확인, 세부
-            디테일은 더 뭉개지는 트레이드오프 감수).
-        fill_holes / sand_surface_enabled: 기본 True(2026-08-12부터) --
-            육안 검증 완료.
-        prune_protrusions: `clean_dense_point_cloud(prune_protrusions=True)`로
-            전달 -- 포인트클라우드 단계(메싱 전)에서 국소 밀도 기준으로
-            뿔/스파이크 후보 점을 미리 제거한다. 발목 부근 뿔 결함(알려진
-            한계, 모듈 docstring 참고)을 겨냥한 대책이지만 기본 False --
-            아직 실측 검증 전.
-        keep_intermediates: `False`(기본)이면 완료 후 `workdir` 안의 모든
-            중간 산출물(undistort 워크스페이스, depth map, OpenMVS 로그,
-            RefineMesh 반복 단계 메쉬 등)을 지우고 `<workdir>/mesh.ply`
-            하나만 남긴다. 디버깅/로깅용으로 전부 보존하려면 `True`.
+        sparse_dir(필수): sparse 재구성 폴더. 확실치 않으면 `largest_sparse_dir()`.
+        masks_dir(필수): `masking.generate_masks(..., dilate=0)` 결과 폴더.
+        refine(False): RefineMesh(느림) 실행 여부.
+        visibility_filter_threshold(None): 음수(예: -1)면 가시성 필터 활성화.
+        grazing_filter_min_score(None): grazing 필터 임계값, visibility보다 먼저 적용.
+        reprojection_consistency_min_vote(None): 배경 오염 필터, 권장 안 함.
+        free_space_support/thickness_factor/quality_factor: `run_reconstruct_mesh()` 전달.
+        refine_decimate/refine_regularity_weight: `refine=True`일 때 `run_refine_mesh()` 전달.
+        smooth_high_curvature(True): 고곡률 스무딩 여부, curvature_* 로 강도 조절.
+        fill_holes/sand_surface_enabled(True): 구멍 메움/사포질 후처리.
+        prune_protrusions(False): 포인트클라우드 단계 뿔 프루닝.
+        keep_intermediates(False): 중간 산출물 보존 여부.
     """
     # OpenMVS 서브프로세스는 -w(workdir)를 cwd로 실행되므로, 그 외 입력 경로는
-    # 전부 절대경로로 넘겨야 한다 -- 상대경로를 그대로 두면 cwd가 바뀐 뒤
-    # 엉뚱한 곳을 가리키게 된다(실측으로 확인된 버그, 조용히 실패하고 OpenMVS
-    # 자체 로그도 안 남아 원인 파악이 어려웠다).
+    # 전부 절대경로로 넘겨야 한다 -- 상대경로면 cwd가 바뀐 뒤 엉뚱한 곳을
+    # 가리키게 된다.
     sparse_dir = Path(sparse_dir).resolve()
     images_dir = Path(images_dir).resolve()
     masks_dir = Path(masks_dir).resolve()
@@ -1369,9 +1225,9 @@ def run_dense_pipeline(
         )
 
     # 뿔/스파이크 사후 프루닝(prune_thin_protrusions)은 메쉬 위상을 망가뜨려
-    # 버렸다(모듈 docstring 11번) -- 점 단위 사전 제거(clean_dense_point_cloud
-    # 의 prune_protrusions, 기본 꺼짐) 또는 위 visibility_filter_threshold 중
-    # 하나를 실측으로 검증해 켤 것. 여기서는 이미 분리된 부유 파편만 정리한다.
+    # 안 쓴다 -- 점 단위 사전 제거(clean_dense_point_cloud의
+    # prune_protrusions, 기본 꺼짐)를 대신 쓸 것. 여기서는 이미 분리된
+    # 부유 파편만 정리한다.
     mesh = trimesh.load(mesh_ply, process=False)
     mesh, faces_before, faces_after = keep_largest_component(mesh)
     changed = faces_after < faces_before

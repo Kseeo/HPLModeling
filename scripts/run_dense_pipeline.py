@@ -1,23 +1,14 @@
 """Sparse SfM 결과 -> OpenMVS dense 포인트클라우드/메쉬. `foot_engine.sfm.dense` CLI.
 
-실제 로직은 `foot_engine.sfm.dense`에 있다 — 이 파일은 인자 파싱과 출력
-포맷만 담당하는 얇은 CLI 래퍼다. 튜닝 근거(마스크 dilate=0, DBSCAN 미사용,
-smooth=0 등)는 `dense.py` 모듈 docstring 참고.
+실제 로직은 `foot_engine.sfm.dense`에 있다 — 이 파일은 인자 파싱/출력만
+담당하는 얇은 CLI 래퍼다. 선택적 단계 — 실제 3D 메쉬가 필요할 때만 쓴다.
 
-**선택적 단계**다 — `fitting.py` 경로(스칼라 계측치만 필요)는 이 스크립트
-없이도 그대로 동작한다. 실제 3D 메쉬(시각화/QA/향후 고정밀 활용)가 필요할
-때만 쓴다.
+**OpenMVS 별도 설치 필요**: `OPENMVS_BIN_DIR` 환경변수를 실행파일 폴더로
+설정하거나 `--openmvs-bin`으로 직접 넘길 것. 설치 방법은 README 참고.
 
-**OpenMVS 별도 설치 필요** (`InterfaceCOLMAP`/`DensifyPointCloud`/
-`ReconstructMesh`/`RefineMesh`, CPU 빌드로 충분): 이 스크립트를 돌리기 전
-`OPENMVS_BIN_DIR` 환경변수를 그 실행파일들이 있는 폴더로 설정하거나
-`--openmvs-bin`으로 직접 넘길 것. 설치 방법은 README 참고.
-
-이 스크립트로 dense 파라미터만 바꿔 재실행하려면(sparse SfM 재계산 없이),
-1번을 `--keep-intermediates`로 돌려 images/sparse를 남겨둬야 한다 — 기본은
-끝나면 정리됨(`dense.py` docstring 8번 참고). 재튜닝이 끝나 더는 이 run_dir로
-돌아올 일이 없으면 `--cleanup-sfm-scratch`로 이미 다 쓴 sparse SfM 찌꺼기
-(masks/, database.db, sparse_points.ply, cleaned_points.ply)를 지운다.
+dense 파라미터만 바꿔 재실행하려면(sparse SfM 재계산 없이) 1번을
+`--keep-intermediates`로 돌려 images/sparse를 남겨둬야 한다. 재튜닝이
+끝났으면 `--cleanup-sfm-scratch`로 남은 sparse SfM 찌꺼기를 지운다.
 
 사용 예::
 
@@ -90,8 +81,7 @@ def main(argv: list[str] | None = None) -> int:
     if masks_dir is None:
         masks_dir = run_dir / "masks_dense"
         if masks_dir.is_dir() and any(masks_dir.iterdir()):
-            # run_sfm_pipeline.py --keep-intermediates로 이미 만들어 둔 걸 재사용.
-            # rembg/피부 정제 추론은 비싸서 있는 걸 또 돌리지 않는다.
+            # 있으면 재사용(재생성 안 함)
             print(f"[dense] 기존 마스크 재사용: {masks_dir}")
         else:
             from foot_engine.sfm.masking import generate_masks
@@ -127,9 +117,7 @@ def main(argv: list[str] | None = None) -> int:
         keep_intermediates=args.keep_intermediates,
     )
 
-    # run_dense_pipeline()이 만든 mesh_path는 임의 좌표계/임의 스케일 —
-    # run_pipeline()과 동일한 후처리(축 정렬 + 스케일링 + 바닥 정착)를 거쳐
-    # 같은 자리에 덮어쓴다.
+    # 축 정렬 + 스케일링 + 바닥 정착 후처리, 같은 자리에 덮어쓴다.
     mesh = trimesh.load(mesh_path, process=False)
     mesh, scale_factor = finalize_mesh(mesh, reference_length_mm=args.reference_length_mm)
     mesh.export(mesh_path)
