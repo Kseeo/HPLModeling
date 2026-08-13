@@ -111,6 +111,8 @@ def main(argv: list[str] | None = None) -> int:
         curvature_alpha=args.curvature_alpha,
         fill_holes=args.fill_holes,
         sand_surface_enabled=args.sand_surface_enabled,
+        sand_min_neighbors=args.sand_min_neighbors, sand_max_neighbors=args.sand_max_neighbors,
+        sand_iterations=args.sand_iterations,
         prune_protrusions=args.prune_protrusions,
         keep_intermediates=args.keep_intermediates,
     )

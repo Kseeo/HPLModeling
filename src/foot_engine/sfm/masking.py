@@ -188,42 +188,49 @@ def generate_masks(
     refined_count = 0
     rejected_names: list[str] = []
     rejected_reasons = {"no_foot": 0, "low_coverage": 0, "skin_refine_collapsed": 0}
-    for path in paths:
-        img = cv2.imread(str(path))
-        rgba = remove(img, session=session)  # rembg는 BGR ndarray도 그대로 받는다
-        alpha = rgba[:, :, 3]
-        mask = (alpha > 10).astype(np.uint8) * 255
-        rejected = False
+    try:
+        for path in paths:
+            img = cv2.imread(str(path))
+            rgba = remove(img, session=session)  # rembg는 BGR ndarray도 그대로 받는다
+            alpha = rgba[:, :, 3]
+            mask = (alpha > 10).astype(np.uint8) * 255
+            rejected = False
 
-        coverage = (mask > 0).mean()
-        if coverage < reject_coverage:
-            # 발이 아예 프레임에 없음.
-            rejected_reasons["no_foot"] += 1
-            rejected = True
-        elif coverage < min_coverage:
-            # 세그멘테이션이 애매하게 실패.
-            rejected_reasons["low_coverage"] += 1
-            rejected = True
-        elif skin_segmenter is not None:
-            # rembg가 잡은 "사람" 영역 안에서 옷/장신구만 추가로 뺀다.
-            skin = skin_only_mask(skin_segmenter, img, erode=skin_erode)
-            refined = cv2.bitwise_and(mask, skin)
-            if (refined > 0).mean() >= min_coverage:
-                mask = refined
-                refined_count += 1
-            else:
-                # 정제 결과가 너무 작아짐 — 정제 전 마스크로 되돌아가면 배경이
-                # 섞일 수 있어 이 프레임을 제외한다.
-                rejected_reasons["skin_refine_collapsed"] += 1
+            coverage = (mask > 0).mean()
+            if coverage < reject_coverage:
+                # 발이 아예 프레임에 없음.
+                rejected_reasons["no_foot"] += 1
                 rejected = True
+            elif coverage < min_coverage:
+                # 세그멘테이션이 애매하게 실패.
+                rejected_reasons["low_coverage"] += 1
+                rejected = True
+            elif skin_segmenter is not None:
+                # rembg가 잡은 "사람" 영역 안에서 옷/장신구만 추가로 뺀다.
+                skin = skin_only_mask(skin_segmenter, img, erode=skin_erode)
+                refined = cv2.bitwise_and(mask, skin)
+                if (refined > 0).mean() >= min_coverage:
+                    mask = refined
+                    refined_count += 1
+                else:
+                    # 정제 결과가 너무 작아짐 — 정제 전 마스크로 되돌아가면 배경이
+                    # 섞일 수 있어 이 프레임을 제외한다.
+                    rejected_reasons["skin_refine_collapsed"] += 1
+                    rejected = True
 
-        if rejected:
-            mask = np.zeros(mask.shape, dtype=np.uint8)
-            rejected_names.append(path.name)
+            if rejected:
+                mask = np.zeros(mask.shape, dtype=np.uint8)
+                rejected_names.append(path.name)
 
-        for out, kernel in kernels:
-            saved = mask if rejected or kernel is None else cv2.dilate(mask, kernel)
-            cv2.imwrite(str(out / f"{path.name}.png"), saved)
+            for out, kernel in kernels:
+                saved = mask if rejected or kernel is None else cv2.dilate(mask, kernel)
+                cv2.imwrite(str(out / f"{path.name}.png"), saved)
+    finally:
+        # GC가 나중에 아무 때나 __del__로 닫게 두면(예: 한참 뒤 다른 코드가
+        # 도는 도중 가비지 컬렉션이 도는 시점), MediaPipe의 내부 디스패처가
+        # 그 시점에 걸려 영원히 멈추는 경우가 있다 -- 쓰자마자 바로 닫는다.
+        if skin_segmenter is not None:
+            skin_segmenter.close()
 
     return {
         "total": len(paths),
