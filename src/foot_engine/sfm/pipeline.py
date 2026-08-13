@@ -20,16 +20,12 @@ import trimesh
 
 from ..exceptions import CaptureQualityError
 from . import cleaning, dense, frame_quality, masking, reconstruction
-from .geometry import measured_length
+from .dense import DEFAULT_REFERENCE_LENGTH_MM
 
 #: SfM에 넘길 최소 프레임 수 — `reconstruction.extract_frames()`의 "최소 8장
 #: 권장" 가이드와 맞춘다. QC 게이트 통과 후 이보다 적게 남으면 비싼 SfM을
 #: 돌리기 전에 명확한 에러로 끊는다.
 MIN_CANDIDATE_FRAMES = 8
-
-#: 스케일 보정 기준 삼는 자기신고 발길이가 없을 때 쓰는 임시값(mm). 절대
-#: 축척이 아니라 형태 비교/시각화용 placeholder.
-DEFAULT_REFERENCE_LENGTH_MM = 250.0
 
 
 @dataclass(slots=True)
@@ -270,27 +266,13 @@ def run_pipeline(
     # 덩어리인 메쉬에 대한 무의미한 재호출이 된다.
     mesh = trimesh.load(mesh_ply, process=False)
 
-    # 축 정렬(X=길이) + 발바닥 검출(Y=높이, 발바닥이 -Y) — 템플릿이 없어져
-    # 앞/뒤(발끝 방향)는 여전히 못 정하지만, 평탄도 비대칭 휴리스틱으로
-    # 위/아래는 결정한다(`dense.align_sole_down()` docstring 참고, 2026-08-11
-    # 실측: test03에서 신호 확인됨 — 매 실행 검증된 건 아니라 실사용 전
-    # 뷰어로 확인할 것).
-    mesh = dense.align_sole_down(mesh)
-
-    resolved_reference_length_mm = reference_length_mm
-    if resolved_reference_length_mm is None:
-        resolved_reference_length_mm = DEFAULT_REFERENCE_LENGTH_MM
-        print(
-            f"[스케일] 자기신고 발길이 없음 — placeholder {DEFAULT_REFERENCE_LENGTH_MM:.0f}mm 기준으로"
-            " 스케일링(절대 축척 아님, 형태 비교/시각화용 임시값 — 실사용 전 반드시 확인할 것)"
-        )
-    own_length = measured_length(mesh.vertices)
-    scale_factor = resolved_reference_length_mm / own_length
-    mesh.apply_scale(scale_factor)
-    print(
-        f"[스케일] 메쉬 자체 PCA 길이 {own_length:.4f}(SfM 임의 단위) -> "
-        f"{resolved_reference_length_mm:.1f}mm 기준(x{scale_factor:.4f})"
-    )
+    # 축 정렬(X=길이) + 발바닥 검출(Y=높이, 발바닥이 -Y, 접지) + 스케일링 —
+    # 템플릿이 없어져 앞/뒤(발끝 방향)는 여전히 못 정하지만, 평탄도 비대칭
+    # 휴리스틱으로 위/아래는 결정한다(`dense.align_sole_down()` docstring
+    # 참고, 2026-08-11 실측: test03에서 신호 확인됨 — 매 실행 검증된 건
+    # 아니라 실사용 전 뷰어로 확인할 것). `dense.run_dense_pipeline.py`
+    # 단독 재실행 스크립트도 같은 후처리를 쓴다(`dense.finalize_mesh()` 참고).
+    mesh, scale_factor = dense.finalize_mesh(mesh, reference_length_mm=reference_length_mm)
 
     out_mesh.parent.mkdir(parents=True, exist_ok=True)
     mesh.export(out_mesh)

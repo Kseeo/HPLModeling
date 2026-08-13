@@ -61,9 +61,10 @@ def add_dense_args(
     )
     parser.add_argument(
         "--reprojection-consistency-min-vote", type=float, default=None,
-        help="전체 카메라 재투영 다수결 필터(filter_by_reprojection_consistency) 임계값(0~1, "
-             "예: 0.6). 생략(기본)하면 안 돌림 — 실측(test03, 배경 오염): 0.6에서 오염 후보 "
-             "44%% 제거/발 오제거 11%%.",
+        help="전체 카메라 재투영 다수결 필터(filter_by_reprojection_consistency) 임계값(0~1). "
+             "생략(기본)하면 안 돌림 — 권장: 켜지 말 것. 실측(2026-08-13, test00/03): "
+             "관측 카메라가 적은 부위(발등/발뒤꿈치)가 낮은 ratio에서도 통째로 사라지는 "
+             "반면 배경 오염은 오히려 잘 살아남는, ratio로 못 고치는 구조적 문제.",
     )
     parser.add_argument(
         "--free-space-support", action="store_true",
