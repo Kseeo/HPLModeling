@@ -17,6 +17,11 @@ data/
 # filter-repo로 제거하고 강제 push함).
 .claude/
 
+# OpenMVS 실행파일을 저장소 루트에서 직접(진단 목적 등으로) 실행하면 로그를
+# 현재 디렉터리에 남긴다(--working-folder 미지정 시 기본값) — 실제 파이프라인은
+# workdir 안에 남기므로 안 걸리지만, 재발 방지용(2026-08-13, 진단 중 5개 유입/삭제됨).
+/*.log
+
 # 에디터/OS 잡파일
 .DS_Store
 Thumbs.db
