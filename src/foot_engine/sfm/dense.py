@@ -42,6 +42,8 @@ import networkx as nx
 import numpy as np
 import pycolmap
 import trimesh
+import scipy.sparse as sp
+from scipy.sparse.csgraph import dijkstra
 from scipy.spatial import cKDTree
 
 from .geometry import measured_length, pca_axes
@@ -59,9 +61,15 @@ DEFAULT_POSTPROCESS_DMAPS = 3
 
 #: `smooth_high_curvature_regions()` 기본 강도(곡률 백분위 임계값).
 DEFAULT_CURVATURE_PERCENTILE = 60.0
-DEFAULT_CURVATURE_RINGS = 6
-DEFAULT_CURVATURE_ITERATIONS = 15
+DEFAULT_CURVATURE_MIN_RADIUS_MULT = 2.0
+DEFAULT_CURVATURE_MAX_RADIUS_MULT = 25.0
+#: Taubin(λ|μ) 반복 횟수. λ/μ가 서로 상쇄돼 순 이동량이 작아서(단방향
+#: 라플라시안보다 반복이 훨씬 더 필요), 예전 plain Laplacian(15회) 대비
+#: 눈에 보이는 정도까지 올려놓은 값 -- 실측: 15회는 평균 변위 0.10mm로
+#: 거의 안 보였고, 150회는 0.66mm(최대 2.56mm)로 육안 구분 가능.
+DEFAULT_CURVATURE_ITERATIONS = 150
 DEFAULT_CURVATURE_ALPHA = 0.7
+DEFAULT_CURVATURE_MU = -0.75
 
 #: 스케일 보정 기준 삼는 자기신고 발길이가 없을 때 쓰는 임시값(mm). 절대
 #: 축척이 아니라 형태 비교/시각화용 placeholder.
@@ -929,50 +937,116 @@ def smooth_high_curvature_regions(
     mesh: trimesh.Trimesh,
     *,
     curvature_percentile: float = 90.0,
-    rings: int = 5,
+    min_radius_edge_mult: float = 2.0,
+    max_radius_edge_mult: float = 25.0,
     iterations: int = 10,
     alpha: float = 0.6,
+    mu: float = -0.65,
 ) -> trimesh.Trimesh:
-    """곡률이 튀는 정점과 그 주변 링만 라플라시안으로 스무딩한다. 나머지
-    정점은 그대로 둔다.
+    """곡률이 튀는 영역을 Taubin(λ|μ) 스무딩한다. 나머지 정점은 그대로 둔다.
 
     관측 부족으로 생긴 크레이터형 결함 완화용 -- 노이즈와 진짜 굴곡을
     구분하지 못해 발가락 사이 같은 진짜 디테일도 함께 뭉개진다.
 
+    확산 반경을 전체에 고정 ring 수로 주지 않고, **코어 영역(연결된 고곡률
+    정점 덩어리) 하나하나마다 그 영역의 곡률 반경(1/|곡률|)에 비례해서**
+    다르게 준다(curvature-adaptive smoothing -- bilateral mesh denoising와
+    같은 원리: 완만하고 넓은 결함은 넓게, 좁고 조밀한 디테일은 좁게). 뒤꿈치처럼
+    완만한 큰 크레이터는 곡률 반경이 커서 넓게 퍼지고, 발가락 사이처럼
+    급격한 작은 굴곡은 반경이 작아 좁게만 퍼진다. 반경은 위상 그래프의
+    실거리(다익스트라)로 잰다 -- 홉 수 기준이면 삼각형 크기가 들쭉날쭉할 때
+    영역마다 실제 퍼지는 거리가 달라진다.
+
+    평범한(가중치 없는) 라플라시안 한 방향으로만 반복하면 이웃 평균 쪽으로
+    계속 당기기만 해서 체적이 체계적으로 줄어드는 편향이 생긴다(실측:
+    영향받은 정점의 89%가 법선 안쪽으로 이동). `alpha`(양의 라플라시안
+    스텝)와 `mu`(반대 방향 스텝, `|mu| > alpha`)를 번갈아 적용하는 Taubin
+    스무딩으로 그 수축을 상쇄한다 -- 같은 조건에서 안쪽 이동 비율이 89%->10%로
+    줄고 평균 변위도 사실상 0에 가까워짐을 확인.
+
     Args:
         curvature_percentile: 이 백분위 이상 |곡률|인 정점을 코어로 삼는다.
-        rings: 코어에서 몇 단계 인접 정점까지 감쇠 가중치로 확산시킬지.
+        min_radius_edge_mult/max_radius_edge_mult: 영역별 확산 반경을
+            전형적 엣지 길이의 이 배수 범위로 clip한다 -- 거의 평평해
+            곡률이 0에 가까운 영역이 반경 폭주(1/0)하는 것을 막는 안전장치.
+        alpha: 라플라시안(수축) 스텝 크기.
+        mu: 역방향(팽창) 스텝 크기(음수, 절댓값이 alpha보다 커야 함).
     """
     v = mesh.vertices.copy()
     n = len(v)
     edge_len = np.linalg.norm(v[mesh.edges[:, 0]] - v[mesh.edges[:, 1]], axis=1)
-    radius = float(np.median(edge_len)) * 4
-    curv = trimesh.curvature.discrete_mean_curvature_measure(mesh, v, radius)
+    typical_edge = float(np.median(edge_len))
+    curv = trimesh.curvature.discrete_mean_curvature_measure(mesh, v, typical_edge * 4)
 
     thresh = np.percentile(np.abs(curv), curvature_percentile)
     core_mask = np.abs(curv) > thresh
 
     neighbors = mesh.vertex_neighbors
     weight = np.zeros(n)
-    weight[core_mask] = 1.0
-    frontier = set(np.where(core_mask)[0].tolist())
-    visited = set(frontier)
-    for w in np.linspace(1.0, 0.2, rings):
-        next_frontier = {nb for idx in frontier for nb in neighbors[idx] if nb not in visited}
-        for idx in next_frontier:
-            weight[idx] = max(weight[idx], w)
-        visited |= next_frontier
-        frontier = next_frontier
+
+    if core_mask.any():
+        # 코어를 위상 연결요소(=국소 결함 하나)별로 나눈다.
+        visited = np.zeros(n, dtype=bool)
+        clusters: list[np.ndarray] = []
+        for start in np.where(core_mask)[0]:
+            if visited[start]:
+                continue
+            stack, comp = [start], [start]
+            visited[start] = True
+            while stack:
+                cur = stack.pop()
+                for nb in neighbors[cur]:
+                    if core_mask[nb] and not visited[nb]:
+                        visited[nb] = True
+                        comp.append(nb)
+                        stack.append(nb)
+            clusters.append(np.array(comp, dtype=np.int64))
+
+        edges_u = mesh.edges_unique
+        elen_u = np.linalg.norm(v[edges_u[:, 0]] - v[edges_u[:, 1]], axis=1)
+        graph = sp.csr_matrix(
+            (np.concatenate([elen_u, elen_u]),
+             (np.concatenate([edges_u[:, 0], edges_u[:, 1]]), np.concatenate([edges_u[:, 1], edges_u[:, 0]]))),
+            shape=(n, n),
+        )
+        min_radius = typical_edge * min_radius_edge_mult
+        max_radius = typical_edge * max_radius_edge_mult
+
+        for comp in clusters:
+            local_radius = 1.0 / np.maximum(np.abs(curv[comp]), 1e-9)
+            spread_radius = float(np.clip(np.median(local_radius), min_radius, max_radius))
+            dist = dijkstra(graph, indices=comp, min_only=True, limit=spread_radius, directed=False)
+            reached = np.isfinite(dist)
+            w = np.clip(1.0 - dist[reached] / spread_radius, 0.0, 1.0)
+            weight[reached] = np.maximum(weight[reached], w)
+        weight[core_mask] = 1.0
+
+    # 행별로 정규화한(각 행 합=1) 인접 행렬 -- 이웃 평균을 희소행렬 곱 한 번으로
+    # 계산한다(파이썬 for문 대비 반복이 많을 때 훨씬 빠름). 이웃 없는 정점은
+    # 자기 자신에 1을 둬 평균이 제자리가 되게 한다.
+    rows = np.concatenate([np.full(len(neighbors[i]), i) for i in range(n)])
+    cols = np.concatenate([np.asarray(neighbors[i], dtype=np.int64) for i in range(n)])
+    deg = np.array([len(neighbors[i]) for i in range(n)])
+    vals = np.concatenate([np.full(len(neighbors[i]), 1.0 / len(neighbors[i])) if len(neighbors[i]) else np.array([])
+                            for i in range(n)])
+    adj = sp.csr_matrix((vals, (rows, cols)), shape=(n, n))
+    isolated = deg == 0
+    if isolated.any():
+        adj = adj + sp.csr_matrix((np.ones(isolated.sum()), (np.where(isolated)[0], np.where(isolated)[0])), shape=(n, n))
+
+    def laplacian_step(vv: np.ndarray, step: float) -> np.ndarray:
+        avg = adj @ vv
+        return vv + weight[:, None] * step * (avg - vv)
 
     new_v = v.copy()
     for _ in range(iterations):
-        avg = np.array([new_v[neighbors[i]].mean(axis=0) if len(neighbors[i]) else new_v[i] for i in range(n)])
-        new_v = new_v + weight[:, None] * alpha * (avg - new_v)
+        new_v = laplacian_step(new_v, alpha)
+        new_v = laplacian_step(new_v, mu)
 
     out = mesh.copy()
     out.vertices = new_v
     print(
-        f"[dense] 고곡률 국소 스무딩: 정점 {int((weight > 0).sum()):,}/{n:,}개 영향"
+        f"[dense] 고곡률 국소 스무딩(Taubin λ|μ): 정점 {int((weight > 0).sum()):,}/{n:,}개 영향"
         f"(코어 {int(core_mask.sum()):,}개, curvature_percentile={curvature_percentile})"
     )
     return out
@@ -1100,6 +1174,107 @@ def align_sole_down(
     return aligned
 
 
+def find_leg_cut_plane(
+    mesh: trimesh.Trimesh,
+    *,
+    n_bins: int = 50,
+    neck_ratio: float = 0.6,
+    recovery_ratio: float = 0.55,
+    min_side_bins: int = 6,
+    n_surface_samples: int = 20_000,
+    rng: np.random.Generator | None = None,
+) -> tuple[np.ndarray, np.ndarray] | None:
+    """다리(정강이)까지 같이 찍힌 스캔에서 발목처럼 잘록해졌다가(neck) 다시
+    굵어진 채 관측 경계까지 안 가늘어지는(다리) 패턴을 찾아 자를 평면을 낸다.
+
+    발끝/뒤꿈치처럼 해부학적으로 가늘어지며 "끝나는" 패턴과 구분하려고,
+    목 이후 구간이 다시 굵어진 채로 경계까지 유지되는지(=해부학적 taper가
+    아니라 카메라 프레임에 잘린 것)를 확인한다. 패턴이 뚜렷하지 않으면
+    `None` -- 멀쩡한 발을 잘못 잘라내는 것보다 다리 포함 케이스를 놓치는
+    쪽이 안전하다는 원칙(`clean_dense_point_cloud`의 `max_protrusion_ratio`와
+    같은 태도).
+
+    길이축은 이 함수 안에서 표면적 균등 샘플로 다시 구한다 -- 정점을 쓰면
+    `align_sole_down()`과 같은 삼각화 밀도 편향이 생긴다.
+
+    Returns:
+        `mesh.slice_plane()`에 그대로 넘기면 발 쪽(양의 normal 방향)만
+        남는 (plane_origin, plane_normal). 확신이 없으면 `None`.
+    """
+    if rng is None:
+        rng = np.random.default_rng(0)
+    surface_points, _ = trimesh.sample.sample_surface(mesh, n_surface_samples, seed=rng)
+    centroid = surface_points.mean(axis=0)
+    c = surface_points - centroid
+    length_axis = pca_axes(c)[:, 0]
+
+    t = c @ length_axis
+    perp = c - np.outer(t, length_axis)
+    r = np.linalg.norm(perp, axis=1)
+    edges = np.linspace(t.min(), t.max(), n_bins + 1)
+    idx = np.clip(np.digitize(t, edges) - 1, 0, n_bins - 1)
+    widths = np.full(n_bins, np.nan)
+    for b in range(n_bins):
+        sel = r[idx == b]
+        if len(sel) > 20:
+            widths[b] = np.percentile(sel, 90)
+    centers = (edges[:-1] + edges[1:]) / 2
+
+    # 양쪽 방향(어느 쪽이 발 끝인지 모르므로) 다 검사해 더 뚜렷한 쪽을 채택.
+    best: tuple[float, float, float] | None = None
+    for keep_sign, order in ((1.0, range(n_bins - 1, -1, -1)), (-1.0, range(n_bins))):
+        valid = [i for i in order if not np.isnan(widths[i])]
+        if len(valid) < min_side_bins * 2:
+            continue
+        # 양끝 taper 자체를 목으로 오인하지 않도록 중간 70% 범위에서만 찾는다.
+        mid_lo, mid_hi = int(len(valid) * 0.15), int(len(valid) * 0.85)
+        mid_candidates = valid[mid_lo:mid_hi]
+        if not mid_candidates:
+            continue
+        neck_i = min(mid_candidates, key=lambda i: widths[i])
+        pos = valid.index(neck_i)
+        before, after = valid[: pos + 1], valid[pos:]
+        if len(before) < min_side_bins or len(after) < min_side_bins:
+            continue
+        w_before_max = max(widths[i] for i in before)
+        w_neck = widths[neck_i]
+        w_tail_end = float(np.mean([widths[i] for i in after[-min_side_bins:]]))
+        if (
+            w_neck <= neck_ratio * w_before_max
+            and w_tail_end >= recovery_ratio * w_before_max
+            and w_tail_end >= w_neck * 1.3
+        ):
+            score = w_before_max - w_neck
+            if best is None or score > best[0]:
+                best = (score, keep_sign, centers[neck_i])
+
+    if best is None:
+        return None
+    _, keep_sign, neck_t = best
+    plane_origin = centroid + neck_t * length_axis
+    plane_normal = keep_sign * length_axis
+    return plane_origin, plane_normal
+
+
+def trim_leg_segment(mesh: trimesh.Trimesh, **kwargs) -> trimesh.Trimesh:
+    """`find_leg_cut_plane()`으로 다리 포함 패턴이 확인되면 잘라내고, 아니면
+    원본 그대로 반환한다(패턴이 애매하면 아무것도 안 함).
+    """
+    cut = find_leg_cut_plane(mesh, **kwargs)
+    if cut is None:
+        return mesh
+    plane_origin, plane_normal = cut
+    trimmed = mesh.slice_plane(plane_origin, plane_normal, cap=True)
+    if trimmed is None or len(trimmed.vertices) == 0:
+        print("[trim] 다리 패턴이 감지됐지만 자르기 결과가 비어 원본을 유지합니다")
+        return mesh
+    print(
+        f"[trim] 다리 포함 패턴 감지 -- 발목 지점에서 잘라냄 "
+        f"(정점 {len(mesh.vertices):,} -> {len(trimmed.vertices):,})"
+    )
+    return trimmed
+
+
 def rest_on_floor(
     mesh: trimesh.Trimesh,
     *,
@@ -1144,6 +1319,7 @@ def finalize_mesh(
     *,
     reference_length_mm: float | None = None,
     z_up: bool = True,
+    trim_leg: bool = False,
 ) -> tuple[trimesh.Trimesh, float]:
     """`run_dense_pipeline()`이 만든 원본 메쉬(임의 좌표계/임의 스케일)를
     축 정렬 + 스케일링 + 바닥 정착까지 마친 최종 메쉬로 만든다.
@@ -1153,10 +1329,17 @@ def finalize_mesh(
     Args:
         z_up: 기본 True -- 내부적으로는 Y=높이로 계산하지만, 최종 결과는
             `to_z_up()`으로 Z=높이 좌표계로 내보낸다(대부분의 뷰어 관례).
+        trim_leg(False): 발목 위 다리까지 찍혀 축 정렬이 다리 쪽으로 쏠리는
+            케이스를 겨냥해 `trim_leg_segment()`로 다리를 잘라내고 정렬한다.
+            패턴이 뚜렷할 때만 자르지만(`find_leg_cut_plane()` 참고), 아직
+            소수 사례로만 검증돼 기본은 꺼짐 -- 다리가 안 찍힌 정상 스캔에는
+            영향 없어야 하나 더 검증 전까지는 필요할 때만 켤 것.
 
     Returns:
         (정렬/스케일/접지 완료된 메쉬, 적용된 스케일 배율)
     """
+    if trim_leg:
+        mesh = trim_leg_segment(mesh)
     mesh = align_sole_down(mesh)
 
     resolved_reference_length_mm = reference_length_mm
@@ -1202,9 +1385,11 @@ def run_dense_pipeline(
     refine_regularity_weight: float | None = None,
     smooth_high_curvature: bool = True,
     curvature_percentile: float = DEFAULT_CURVATURE_PERCENTILE,
-    curvature_rings: int = DEFAULT_CURVATURE_RINGS,
+    curvature_min_radius_mult: float = DEFAULT_CURVATURE_MIN_RADIUS_MULT,
+    curvature_max_radius_mult: float = DEFAULT_CURVATURE_MAX_RADIUS_MULT,
     curvature_iterations: int = DEFAULT_CURVATURE_ITERATIONS,
     curvature_alpha: float = DEFAULT_CURVATURE_ALPHA,
+    curvature_mu: float = DEFAULT_CURVATURE_MU,
     fill_holes: bool = True,
     sand_surface_enabled: bool = True,
     sand_min_neighbors: int = 16,
@@ -1320,8 +1505,9 @@ def run_dense_pipeline(
 
     if smooth_high_curvature:
         mesh = smooth_high_curvature_regions(
-            mesh, curvature_percentile=curvature_percentile, rings=curvature_rings,
-            iterations=curvature_iterations, alpha=curvature_alpha,
+            mesh, curvature_percentile=curvature_percentile,
+            min_radius_edge_mult=curvature_min_radius_mult, max_radius_edge_mult=curvature_max_radius_mult,
+            iterations=curvature_iterations, alpha=curvature_alpha, mu=curvature_mu,
         )
         changed = True
 

@@ -102,8 +102,15 @@ def add_dense_args(
              f"{dense.DEFAULT_CURVATURE_PERCENTILE}). 낮출수록 더 넓은 영역이 스무딩된다.",
     )
     parser.add_argument(
-        "--curvature-rings", type=int, default=dense.DEFAULT_CURVATURE_RINGS,
-        help=f"코어에서 인접 정점으로 감쇠 확산시킬 링 수(기본 {dense.DEFAULT_CURVATURE_RINGS}).",
+        "--curvature-min-radius-mult", type=float, default=dense.DEFAULT_CURVATURE_MIN_RADIUS_MULT,
+        help=f"영역(연결된 고곡률 정점 덩어리)별 확산 반경의 하한(전형적 엣지 길이의 배수, 기본 "
+             f"{dense.DEFAULT_CURVATURE_MIN_RADIUS_MULT}). 실제 반경은 그 영역의 곡률 반경(1/|곡률|)에서 "
+             "정하되 이 범위로 clip한다.",
+    )
+    parser.add_argument(
+        "--curvature-max-radius-mult", type=float, default=dense.DEFAULT_CURVATURE_MAX_RADIUS_MULT,
+        help=f"위 확산 반경의 상한(기본 {dense.DEFAULT_CURVATURE_MAX_RADIUS_MULT}) -- 거의 평평한(곡률 "
+             "0에 가까운) 영역이 반경 폭주하는 것을 막는 안전장치.",
     )
     parser.add_argument(
         "--curvature-iterations", type=int, default=dense.DEFAULT_CURVATURE_ITERATIONS,
@@ -111,7 +118,13 @@ def add_dense_args(
     )
     parser.add_argument(
         "--curvature-alpha", type=float, default=dense.DEFAULT_CURVATURE_ALPHA,
-        help=f"반복당 이동 비율(0~1, 기본 {dense.DEFAULT_CURVATURE_ALPHA}).",
+        help=f"반복당 라플라시안(수축) 스텝 크기(0~1, 기본 {dense.DEFAULT_CURVATURE_ALPHA}).",
+    )
+    parser.add_argument(
+        "--curvature-mu", type=float, default=dense.DEFAULT_CURVATURE_MU,
+        help=f"반복당 역방향(팽창) 스텝 크기(음수, 절댓값이 curvature-alpha보다 커야 함, 기본 "
+             f"{dense.DEFAULT_CURVATURE_MU}). alpha와 번갈아 적용하는 Taubin 스무딩으로 체적 "
+             "수축 편향을 상쇄한다.",
     )
     parser.add_argument(
         "--no-fill-holes", dest="fill_holes", action="store_false",
@@ -141,6 +154,12 @@ def add_dense_args(
         help="포인트클라우드 단계(메싱 전)에서 국소 밀도 기준으로 뿔/스파이크 후보 점을 "
              "미리 제거한다(clean_dense_point_cloud prune_protrusions). 발목 부근 뿔 결함을 "
              "겨냥한 대책. 기본 꺼짐 — 실행마다 결과가 흔들려 검증 전.",
+    )
+    parser.add_argument(
+        "--trim-leg", action="store_true",
+        help="발목 위 다리까지 찍혀 축 정렬이 다리 쪽으로 쏠리는 케이스를 겨냥해, 잘록해졌다가"
+             "(발목) 다시 굵어진 채 안 가늘어지는(다리) 패턴이 뚜렷할 때만 잘라내고 정렬한다"
+             "(finalize_mesh trim_leg). 애매하면 자르지 않음. 기본 꺼짐 — 소수 사례로만 검증됨.",
     )
     parser.add_argument(
         "--keep-intermediates", action="store_true",

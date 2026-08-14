@@ -165,20 +165,26 @@ elif st.session_state.stage == "run":
         "RefineMesh(정밀 보정) 사용 — 표면 노이즈를 확실히 줄이지만 전체 소요 시간이 크게 늘어남",
         value=False,
     )
+    trim_leg = st.checkbox(
+        "발목 위 다리 자동 트림 — 발목까지만이 아니라 다리(정강이)까지 찍혀서 축 정렬이 "
+        "다리 쪽으로 쏠리는 경우를 겨냥. 패턴이 뚜렷할 때만 자르고, 애매하면 안 자름. "
+        "소수 사례로만 검증됨",
+        value=False,
+    )
     # resolution_level/scales를 낮추면(성긴 해상도/적은 반복) 빨라지지만, 같은 영상도
     # 실행마다 폭 치수가 달라지는 문제가 있어 프리셋으로 노출하지 않고 파이프라인
     # 기본값(최고 정밀도)을 그대로 쓴다.
 
     # (sand_min_neighbors, sand_max_neighbors, sand_iterations,
-    #  curvature_percentile, curvature_rings, curvature_iterations, curvature_alpha)
+    #  curvature_percentile, curvature_max_radius_mult, curvature_iterations, curvature_alpha)
     SMOOTH_PRESETS = {
-        "기본": (16, 32, 3, 60.0, 6, 15, 0.7),
-        "강하게(디테일 희생)": (40, 80, 8, 20.0, 8, 25, 0.8),
+        "기본": (16, 32, 3, 60.0, 25.0, 150, 0.7),
+        "강하게(디테일 희생)": (40, 80, 8, 20.0, 40.0, 250, 0.8),
     }
     smooth_strength = st.select_slider("표면 매끄러움", options=list(SMOOTH_PRESETS), value="기본")
     (
         sand_min_neighbors, sand_max_neighbors, sand_iterations,
-        curvature_percentile, curvature_rings, curvature_iterations, curvature_alpha,
+        curvature_percentile, curvature_max_radius_mult, curvature_iterations, curvature_alpha,
     ) = SMOOTH_PRESETS[smooth_strength]
 
     if st.button("실행", type="primary"):
@@ -201,9 +207,10 @@ elif st.session_state.stage == "run":
                         sand_max_neighbors=sand_max_neighbors,
                         sand_iterations=sand_iterations,
                         curvature_percentile=curvature_percentile,
-                        curvature_rings=curvature_rings,
+                        curvature_max_radius_mult=curvature_max_radius_mult,
                         curvature_iterations=curvature_iterations,
                         curvature_alpha=curvature_alpha,
+                        trim_leg=trim_leg,
                         keep_intermediates=True,
                     )
             except CaptureQualityError as e:

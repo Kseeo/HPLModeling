@@ -108,14 +108,17 @@ def main(argv: list[str] | None = None) -> int:
         refine_regularity_weight=args.refine_regularity_weight,
         smooth_high_curvature=args.smooth_high_curvature,
         curvature_percentile=args.curvature_percentile,
-        curvature_rings=args.curvature_rings,
+        curvature_min_radius_mult=args.curvature_min_radius_mult,
+        curvature_max_radius_mult=args.curvature_max_radius_mult,
         curvature_iterations=args.curvature_iterations,
         curvature_alpha=args.curvature_alpha,
+        curvature_mu=args.curvature_mu,
         fill_holes=args.fill_holes,
         sand_surface_enabled=args.sand_surface_enabled,
         sand_min_neighbors=args.sand_min_neighbors, sand_max_neighbors=args.sand_max_neighbors,
         sand_iterations=args.sand_iterations,
         prune_protrusions=args.prune_protrusions,
+        trim_leg=args.trim_leg,
         keep_intermediates=args.keep_intermediates,
     )
 
