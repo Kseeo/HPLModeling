@@ -74,6 +74,8 @@ def run_pipeline(
     refine: bool = False,
     postprocess_dmaps: int = dense.DEFAULT_POSTPROCESS_DMAPS,
     dense_max_threads: int = dense.DEFAULT_MAX_THREADS,
+    densify_resolution_level: int | None = None,
+    densify_number_views_fuse: int | None = None,
     visibility_filter_threshold: int | None = None,
     grazing_filter_min_score: float | None = None,
     reprojection_consistency_min_vote: float | None = None,
@@ -117,6 +119,8 @@ def run_pipeline(
         cluster(True): QA용 `cleaned_points.ply`에 DBSCAN 적용 여부.
         openmvs_bin(None): OpenMVS 실행파일 폴더.
         refine(False): RefineMesh(느림) 실행 여부.
+        densify_resolution_level(None)/densify_number_views_fuse(None): 점군 밀도
+            튜닝, `dense.run_dense_pipeline()`으로 그대로 전달.
         postprocess_dmaps/dense_max_threads/visibility_filter_threshold/
         grazing_filter_min_score/reprojection_consistency_min_vote/
         free_space_support/thickness_factor/quality_factor/refine_decimate/
@@ -230,6 +234,8 @@ def run_pipeline(
         sparse_dir=sparse_dir, images_dir=resolved_images_dir, masks_dir=dense_masks_dir,
         workdir=dense_workdir, openmvs_bin=openmvs_bin, refine=refine,
         postprocess_dmaps=postprocess_dmaps, max_threads=dense_max_threads,
+        densify_resolution_level=densify_resolution_level,
+        densify_number_views_fuse=densify_number_views_fuse,
         visibility_filter_threshold=visibility_filter_threshold,
         grazing_filter_min_score=grazing_filter_min_score,
         reprojection_consistency_min_vote=reprojection_consistency_min_vote,

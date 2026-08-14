@@ -182,6 +182,8 @@ def run_densify_point_cloud(
     openmvs_bin: str | Path | None = None,
     max_threads: int = DEFAULT_MAX_THREADS,
     postprocess_dmaps: int = DEFAULT_POSTPROCESS_DMAPS,
+    resolution_level: int | None = None,
+    number_views_fuse: int | None = None,
     output_name: str = "scene_dense.mvs",
 ) -> Path:
     """마스크 기반 dense 포인트클라우드를 만든다 (`scene_dense.ply` + `.mvs`).
@@ -193,11 +195,20 @@ def run_densify_point_cloud(
             만들 것.
         postprocess_dmaps: 기본 3(remove-speckles+fill-gaps). 저텍스처 평면
             깊이 공백을 메운다. 0이면 비활성.
+        resolution_level: 뎁스맵 계산 전 이미지를 몇 단계 축소할지(0=원본
+            해상도, 숫자가 클수록 더 축소돼 빠르지만 점군이 성겨진다).
+            `None`(기본)이면 OpenMVS 자체 기본값을 그대로 쓴다.
+        number_views_fuse: 점 하나를 살리는 데 필요한 최소 동의 뷰 개수.
+            `None`(기본)이면 OpenMVS 자체 기본값(2).
     """
     bin_dir = _resolve_openmvs_bin(openmvs_bin)
     args = [scene_mvs.name, "-o", output_name, "--max-threads", str(max_threads)]
     if postprocess_dmaps:
         args += ["--postprocess-dmaps", str(postprocess_dmaps)]
+    if resolution_level is not None:
+        args += ["--resolution-level", str(resolution_level)]
+    if number_views_fuse is not None:
+        args += ["--number-views-fuse", str(number_views_fuse)]
     if masks_dir is not None:
         args += ["--mask-path", str(Path(masks_dir).resolve()) + os.sep, "--ignore-mask-label", "0"]
     _run_openmvs("DensifyPointCloud.exe", args, workdir, bin_dir, "log_densify.txt")
@@ -1179,6 +1190,8 @@ def run_dense_pipeline(
     refine: bool = False,
     postprocess_dmaps: int = DEFAULT_POSTPROCESS_DMAPS,
     max_threads: int = DEFAULT_MAX_THREADS,
+    densify_resolution_level: int | None = None,
+    densify_number_views_fuse: int | None = None,
     visibility_filter_threshold: int | None = None,
     grazing_filter_min_score: float | None = None,
     reprojection_consistency_min_vote: float | None = None,
@@ -1206,6 +1219,10 @@ def run_dense_pipeline(
         sparse_dir(필수): sparse 재구성 폴더. 확실치 않으면 `largest_sparse_dir()`.
         masks_dir(필수): `masking.generate_masks(..., dilate=0)` 결과 폴더.
         refine(False): RefineMesh(느림) 실행 여부.
+        densify_resolution_level(None): `run_densify_point_cloud()`의
+            resolution_level 그대로 전달(0=원본 해상도, 더 조밀한 점군).
+        densify_number_views_fuse(None): `run_densify_point_cloud()`의
+            number_views_fuse 그대로 전달.
         visibility_filter_threshold(None): 음수(예: -1)면 가시성 필터 활성화.
         grazing_filter_min_score(None): grazing 필터 임계값, visibility보다 먼저 적용.
         reprojection_consistency_min_vote(None): 배경 오염 필터, 권장 안 함.
@@ -1236,6 +1253,7 @@ def run_dense_pipeline(
     dense_ply = run_densify_point_cloud(
         scene_mvs, openmvs_dir, masks_dir=openmvs_masks_dir, openmvs_bin=openmvs_bin,
         max_threads=max_threads, postprocess_dmaps=postprocess_dmaps,
+        resolution_level=densify_resolution_level, number_views_fuse=densify_number_views_fuse,
     )
     cleaned_ply = openmvs_dir / "scene_dense_cleaned.ply"
     clean_dense_point_cloud(dense_ply, cleaned_ply, prune_protrusions=prune_protrusions)

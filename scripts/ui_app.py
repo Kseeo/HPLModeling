@@ -1,4 +1,4 @@
-"""영상 업로드 -> 프레임 추출 -> 이미지 선택/삭제 -> SfM-dense 파이프라인 실행 웹 UI.
+"""영상/사진 업로드 -> (영상이면) 프레임 추출 -> 이미지 선택/삭제 -> SfM-dense 파이프라인 실행 웹 UI.
 
 `streamlit run scripts/ui_app.py`로 실행한다(일반 `python`으로 실행하지 않음).
 실제 로직은 `foot_engine.sfm`을 그대로 호출한다 — 이 파일은 4단계 위저드
@@ -43,22 +43,47 @@ if "stage" not in st.session_state:
     st.session_state.stage = "upload"
 
 st.title("발 스캔 파이프라인")
-st.caption("1. 영상 업로드 → 2. 프레임 추출 → 3. 이미지 선택/삭제 → 4. SfM-dense 실행")
+st.caption("1. 영상/사진 업로드 → 2. (영상이면) 프레임 추출 → 3. 이미지 선택/삭제 → 4. SfM-dense 실행")
 
 if st.session_state.stage != "upload":
     st.button("처음부터 다시", on_click=_reset)
 
 # ---------------------------------------------------------------- 1. 업로드
 if st.session_state.stage == "upload":
-    uploaded = st.file_uploader("영상 파일 업로드", type=["mp4", "mov", "avi", "mkv"])
-    if uploaded is not None:
-        run_dir = _new_run_dir()
-        video_path = run_dir / f"input{Path(uploaded.name).suffix}"
-        video_path.write_bytes(uploaded.getvalue())
-        st.session_state.run_dir = run_dir
-        st.session_state.video_path = video_path
-        st.session_state.stage = "extract"
-        st.rerun()
+    upload_mode = st.radio("입력 방식", ["영상", "사진 여러 장"], horizontal=True)
+
+    if upload_mode == "영상":
+        uploaded = st.file_uploader("영상 파일 업로드", type=["mp4", "mov", "avi", "mkv"])
+        if uploaded is not None:
+            run_dir = _new_run_dir()
+            video_path = run_dir / f"input{Path(uploaded.name).suffix}"
+            video_path.write_bytes(uploaded.getvalue())
+            st.session_state.run_dir = run_dir
+            st.session_state.video_path = video_path
+            st.session_state.stage = "extract"
+            st.rerun()
+    else:
+        uploaded_images = st.file_uploader(
+            "사진 여러 장 업로드 (촬영 순서대로 선택하면 이후 검토 화면도 그 순서로 정렬됩니다)",
+            type=["jpg", "jpeg", "png"], accept_multiple_files=True,
+        )
+        if uploaded_images:
+            st.write(f"{len(uploaded_images)}장 선택됨")
+            if st.button("업로드", type="primary", disabled=len(uploaded_images) < 8):
+                run_dir = _new_run_dir()
+                images_dir = run_dir / "images"
+                images_dir.mkdir(parents=True, exist_ok=True)
+                # 업로드 순서를 프레임 번호로 그대로 매긴다 -- 원본 파일명은 기기마다
+                # 제각각이라 정렬 기준으로 못 쓴다(select 단계는 이름순 정렬에 의존).
+                for i, f in enumerate(uploaded_images):
+                    ext = Path(f.name).suffix.lower() or ".jpg"
+                    (images_dir / f"frame_{i:05d}{ext}").write_bytes(f.getvalue())
+                st.session_state.run_dir = run_dir
+                st.session_state.images_dir = images_dir
+                st.session_state.stage = "select"
+                st.rerun()
+            if len(uploaded_images) < 8:
+                st.warning("SfM에는 최소 8장이 필요합니다.")
 
 # ---------------------------------------------------------------- 2. 프레임 추출
 elif st.session_state.stage == "extract":
@@ -94,7 +119,7 @@ elif st.session_state.stage == "select":
         st.session_state.sharpness_names = names
     sharpness = st.session_state.sharpness
 
-    st.write(f"추출된 이미지 {len(names)}장 — 흐린 순으로 정렬했습니다. 지울 사진을 체크한 뒤 삭제하세요.")
+    st.write(f"추출된 이미지 {len(names)}장 — 촬영 순서대로 정렬했습니다. 지울 사진을 체크한 뒤 삭제하세요.")
 
     with st.expander("흐린 사진 자동 선택"):
         pct = st.slider("선명도 하위 몇 %를 삭제 후보로 미리 체크할지", 0, 50, 0, 5)
@@ -105,12 +130,10 @@ elif st.session_state.stage == "select":
                 st.session_state[f"del_{n}"] = True
             st.rerun()
 
-    names_by_sharpness = sorted(names, key=lambda n: sharpness[n])
-
     to_delete = []
     n_cols = 5
     cols = st.columns(n_cols)
-    for i, name in enumerate(names_by_sharpness):
+    for i, name in enumerate(names):
         with cols[i % n_cols]:
             st.image(str(images_dir / name), caption=f"{name} (선명도 {sharpness[name]:.1f})", use_container_width=True)
             if st.checkbox("삭제", key=f"del_{name}"):

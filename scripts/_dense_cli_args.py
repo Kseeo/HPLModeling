@@ -44,6 +44,17 @@ def add_dense_args(
              "간헐적 크래시 방지용.",
     )
     parser.add_argument(
+        "--densify-resolution-level", type=int, default=None,
+        help="DensifyPointCloud --resolution-level(0=원본 해상도, 숫자가 클수록 축소돼 "
+             "빠르지만 점군이 성겨진다). 생략(기본)하면 OpenMVS 자체 기본값. "
+             "정밀도를 올리려면 0으로 줄 것 -- 시간은 늘어난다.",
+    )
+    parser.add_argument(
+        "--densify-number-views-fuse", type=int, default=None,
+        help="DensifyPointCloud --number-views-fuse(점 하나를 살릴 최소 동의 뷰 개수). "
+             "생략(기본)하면 OpenMVS 자체 기본값(2).",
+    )
+    parser.add_argument(
         "--visibility-filter-threshold", type=int, default=None,
         help="OpenMVS 내장 가시성 필터(--filter-point-cloud) 임계값(음수, 예: -1). "
              "생략(기본)하면 안 돌림.",
