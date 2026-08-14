@@ -74,6 +74,8 @@ def run_pipeline(
     refine: bool = False,
     postprocess_dmaps: int = dense.DEFAULT_POSTPROCESS_DMAPS,
     dense_max_threads: int = dense.DEFAULT_MAX_THREADS,
+    densify_resolution_level: int | None = None,
+    densify_number_views_fuse: int | None = None,
     visibility_filter_threshold: int | None = None,
     grazing_filter_min_score: float | None = None,
     reprojection_consistency_min_vote: float | None = None,
@@ -84,15 +86,18 @@ def run_pipeline(
     refine_regularity_weight: float | None = None,
     smooth_high_curvature: bool = True,
     curvature_percentile: float = dense.DEFAULT_CURVATURE_PERCENTILE,
-    curvature_rings: int = dense.DEFAULT_CURVATURE_RINGS,
+    curvature_min_radius_mult: float = dense.DEFAULT_CURVATURE_MIN_RADIUS_MULT,
+    curvature_max_radius_mult: float = dense.DEFAULT_CURVATURE_MAX_RADIUS_MULT,
     curvature_iterations: int = dense.DEFAULT_CURVATURE_ITERATIONS,
     curvature_alpha: float = dense.DEFAULT_CURVATURE_ALPHA,
+    curvature_mu: float = dense.DEFAULT_CURVATURE_MU,
     fill_holes: bool = True,
     sand_surface_enabled: bool = True,
     sand_min_neighbors: int = 16,
     sand_max_neighbors: int = 32,
     sand_iterations: int = 3,
     prune_protrusions: bool = False,
+    trim_leg: bool = False,
     keep_intermediates: bool = False,
 ) -> PipelineResult:
     """영상/사진 -> 발/피부 마스크 -> sparse SfM -> dense MVS -> 스케일 보정 메쉬.
@@ -117,13 +122,18 @@ def run_pipeline(
         cluster(True): QA용 `cleaned_points.ply`에 DBSCAN 적용 여부.
         openmvs_bin(None): OpenMVS 실행파일 폴더.
         refine(False): RefineMesh(느림) 실행 여부.
+        densify_resolution_level(None)/densify_number_views_fuse(None): 점군 밀도
+            튜닝, `dense.run_dense_pipeline()`으로 그대로 전달.
         postprocess_dmaps/dense_max_threads/visibility_filter_threshold/
         grazing_filter_min_score/reprojection_consistency_min_vote/
         free_space_support/thickness_factor/quality_factor/refine_decimate/
         refine_regularity_weight/smooth_high_curvature/curvature_percentile/
-        curvature_rings/curvature_iterations/curvature_alpha/fill_holes/
+        curvature_min_radius_mult/curvature_max_radius_mult/curvature_iterations/
+        curvature_alpha/curvature_mu/fill_holes/
         sand_surface_enabled/prune_protrusions: `dense.run_dense_pipeline()`으로
             그대로 전달(각 인자 설명은 그쪽 docstring 참고).
+        trim_leg(False): `dense.finalize_mesh()`로 그대로 전달 -- 다리 포함
+            케이스 자동 트림, 그쪽 docstring 참고.
         keep_intermediates(False): 성공 후 중간 산출물 정리 여부. `True`면
             `run_dense_pipeline.py`로 dense 파라미터 재튜닝 가능.
 
@@ -230,6 +240,8 @@ def run_pipeline(
         sparse_dir=sparse_dir, images_dir=resolved_images_dir, masks_dir=dense_masks_dir,
         workdir=dense_workdir, openmvs_bin=openmvs_bin, refine=refine,
         postprocess_dmaps=postprocess_dmaps, max_threads=dense_max_threads,
+        densify_resolution_level=densify_resolution_level,
+        densify_number_views_fuse=densify_number_views_fuse,
         visibility_filter_threshold=visibility_filter_threshold,
         grazing_filter_min_score=grazing_filter_min_score,
         reprojection_consistency_min_vote=reprojection_consistency_min_vote,
@@ -237,8 +249,10 @@ def run_pipeline(
         quality_factor=quality_factor, refine_decimate=refine_decimate,
         refine_regularity_weight=refine_regularity_weight,
         smooth_high_curvature=smooth_high_curvature,
-        curvature_percentile=curvature_percentile, curvature_rings=curvature_rings,
+        curvature_percentile=curvature_percentile,
+        curvature_min_radius_mult=curvature_min_radius_mult, curvature_max_radius_mult=curvature_max_radius_mult,
         curvature_iterations=curvature_iterations, curvature_alpha=curvature_alpha,
+        curvature_mu=curvature_mu,
         fill_holes=fill_holes, sand_surface_enabled=sand_surface_enabled,
         sand_min_neighbors=sand_min_neighbors, sand_max_neighbors=sand_max_neighbors,
         sand_iterations=sand_iterations,
@@ -253,7 +267,9 @@ def run_pipeline(
 
     # 축 정렬(X=길이, Y=높이·발바닥은 -Y) + 스케일링 + 바닥 정착.
     # `run_dense_pipeline.py`도 같은 후처리를 쓴다(`dense.finalize_mesh()` 참고).
-    mesh, scale_factor = dense.finalize_mesh(mesh, reference_length_mm=reference_length_mm)
+    mesh, scale_factor = dense.finalize_mesh(
+        mesh, reference_length_mm=reference_length_mm, trim_leg=trim_leg,
+    )
 
     out_mesh.parent.mkdir(parents=True, exist_ok=True)
     mesh.export(out_mesh)

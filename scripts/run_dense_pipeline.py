@@ -98,6 +98,8 @@ def main(argv: list[str] | None = None) -> int:
         refine=args.refine,
         postprocess_dmaps=args.postprocess_dmaps,
         max_threads=args.max_threads,
+        densify_resolution_level=args.densify_resolution_level,
+        densify_number_views_fuse=args.densify_number_views_fuse,
         visibility_filter_threshold=args.visibility_filter_threshold,
         grazing_filter_min_score=args.grazing_filter_min_score,
         reprojection_consistency_min_vote=args.reprojection_consistency_min_vote,
@@ -108,9 +110,11 @@ def main(argv: list[str] | None = None) -> int:
         refine_regularity_weight=args.refine_regularity_weight,
         smooth_high_curvature=args.smooth_high_curvature,
         curvature_percentile=args.curvature_percentile,
-        curvature_rings=args.curvature_rings,
+        curvature_min_radius_mult=args.curvature_min_radius_mult,
+        curvature_max_radius_mult=args.curvature_max_radius_mult,
         curvature_iterations=args.curvature_iterations,
         curvature_alpha=args.curvature_alpha,
+        curvature_mu=args.curvature_mu,
         fill_holes=args.fill_holes,
         sand_surface_enabled=args.sand_surface_enabled,
         sand_min_neighbors=args.sand_min_neighbors, sand_max_neighbors=args.sand_max_neighbors,
@@ -121,7 +125,9 @@ def main(argv: list[str] | None = None) -> int:
 
     # 축 정렬 + 스케일링 + 바닥 정착 후처리, 같은 자리에 덮어쓴다.
     mesh = trimesh.load(mesh_path, process=False)
-    mesh, scale_factor = finalize_mesh(mesh, reference_length_mm=args.reference_length_mm)
+    mesh, scale_factor = finalize_mesh(
+        mesh, reference_length_mm=args.reference_length_mm, trim_leg=args.trim_leg,
+    )
     mesh.export(mesh_path)
 
     print(f"\n최종 메쉬: {mesh_path} (정점 {len(mesh.vertices):,}개, 스케일 x{scale_factor:.4f})")
