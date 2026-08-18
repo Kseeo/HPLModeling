@@ -225,6 +225,7 @@ python scripts/inspect_frame_quality.py data/output/sfm_prototype/test00_run/ima
 | `generate_foot_masks.py` | 발/피부 마스크만 단독 생성 |
 | `clean_point_cloud.py` | sparse 점군 배경/노이즈 제거만 단독 실행 (QA용) |
 | `run_dense_pipeline.py` | sparse SfM 결과 → OpenMVS dense 메쉬. 별도 설치 필요(OpenMVS) |
+| `postprocess_mesh.py` | 완성된 메쉬(STL 등)에 배경/파편 제거 + 스무딩만 독립 적용. 사진/카메라 불필요 |
 | `compare_stl_pair.py` | STL 두 개를 정점/면/부피/watertight 기준으로 비교하는 진단 도구 |
 | `ui_app.py` | 영상 업로드 → 프레임 추출 → 이미지 선택/삭제 → 파이프라인 실행 웹 UI(`streamlit run`으로 실행) |
 

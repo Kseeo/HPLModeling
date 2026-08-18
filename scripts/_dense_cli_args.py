@@ -150,6 +150,20 @@ def add_dense_args(
         help="sand_surface 반복 횟수(기본 3).",
     )
     parser.add_argument(
+        "--no-finish-smooth", dest="finish_smooth", action="store_false",
+        help="마감 라플라시안 스무딩(finish_smooth_mesh)을 끈다. 기본 켜짐 — "
+             "sand_surface/smooth_high_curvature로 안 빠지는 잔여 고주파 표면 노이즈를 "
+             "정리한다. 비용 미미(정점 10만개 기준 수 초).",
+    )
+    parser.add_argument(
+        "--finish-smooth-lambda", type=float, default=0.5,
+        help="마감 스무딩 반복당 이웃 평균 쪽으로 당기는 비율(0~1, 기본 0.5).",
+    )
+    parser.add_argument(
+        "--finish-smooth-iterations", type=int, default=40,
+        help="마감 스무딩 반복 횟수(기본 40). 키울수록 매끈해지지만 디테일도 더 죽는다.",
+    )
+    parser.add_argument(
         "--prune-protrusions", action="store_true",
         help="포인트클라우드 단계(메싱 전)에서 국소 밀도 기준으로 뿔/스파이크 후보 점을 "
              "미리 제거한다(clean_dense_point_cloud prune_protrusions). 발목 부근 뿔 결함을 "

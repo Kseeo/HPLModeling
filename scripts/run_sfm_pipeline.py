@@ -117,6 +117,8 @@ def main(argv: list[str] | None = None) -> int:
         sand_surface_enabled=args.sand_surface_enabled,
         sand_min_neighbors=args.sand_min_neighbors, sand_max_neighbors=args.sand_max_neighbors,
         sand_iterations=args.sand_iterations,
+        finish_smooth=args.finish_smooth, finish_smooth_lambda=args.finish_smooth_lambda,
+        finish_smooth_iterations=args.finish_smooth_iterations,
         prune_protrusions=args.prune_protrusions,
         trim_leg=args.trim_leg,
         keep_intermediates=args.keep_intermediates,

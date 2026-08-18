@@ -96,6 +96,9 @@ def run_pipeline(
     sand_min_neighbors: int = 16,
     sand_max_neighbors: int = 32,
     sand_iterations: int = 3,
+    finish_smooth: bool = True,
+    finish_smooth_lambda: float = 0.5,
+    finish_smooth_iterations: int = 40,
     prune_protrusions: bool = False,
     trim_leg: bool = False,
     keep_intermediates: bool = False,
@@ -130,7 +133,8 @@ def run_pipeline(
         refine_regularity_weight/smooth_high_curvature/curvature_percentile/
         curvature_min_radius_mult/curvature_max_radius_mult/curvature_iterations/
         curvature_alpha/curvature_mu/fill_holes/
-        sand_surface_enabled/prune_protrusions: `dense.run_dense_pipeline()`으로
+        sand_surface_enabled/finish_smooth/finish_smooth_lambda/
+        finish_smooth_iterations/prune_protrusions: `dense.run_dense_pipeline()`으로
             그대로 전달(각 인자 설명은 그쪽 docstring 참고).
         trim_leg(False): `dense.finalize_mesh()`로 그대로 전달 -- 다리 포함
             케이스 자동 트림, 그쪽 docstring 참고.
@@ -256,6 +260,8 @@ def run_pipeline(
         fill_holes=fill_holes, sand_surface_enabled=sand_surface_enabled,
         sand_min_neighbors=sand_min_neighbors, sand_max_neighbors=sand_max_neighbors,
         sand_iterations=sand_iterations,
+        finish_smooth=finish_smooth, finish_smooth_lambda=finish_smooth_lambda,
+        finish_smooth_iterations=finish_smooth_iterations,
         prune_protrusions=prune_protrusions,
         keep_intermediates=keep_intermediates,
     )
