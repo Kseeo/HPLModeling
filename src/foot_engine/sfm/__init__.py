@@ -29,7 +29,6 @@ from .dense import (
     align_principal_axes,
     clean_dense_point_cloud,
     convert_masks_for_openmvs,
-    keep_largest_component,
     largest_sparse_dir,
     run_dense_pipeline,
     run_densify_point_cloud,
@@ -48,6 +47,7 @@ from .frame_quality import (
 )
 from .geometry import measured_length, pca_axes
 from .masking import generate_masks, load_skin_segmenter, skin_only_mask
+from .mesh_postprocess import keep_largest_component, postprocess_mesh
 from .pipeline import PipelineResult, run_pipeline
 from .reconstruction import (
     compute_sharpness,
@@ -102,4 +102,6 @@ __all__ = [
     "keep_largest_component",
     "align_principal_axes",
     "run_dense_pipeline",
+    # mesh_postprocess (배경/파편 제거 + 스무딩, 사진/카메라 불필요 -- 완성된 메쉬에도 독립 적용)
+    "postprocess_mesh",
 ]
