@@ -24,6 +24,7 @@
     python -m foot_engine.stl_foot_extract.cli suggest project_229.stl
 
     # 색/텍스처 있는 입력(GLB 등)은 다중뷰 피부분할 투표로 자동 크롭(가장 신뢰도 높음)
+    # + 기본으로 축 정렬/스케일/바닥 접지(finalize_mesh)까지 적용됨(--no-align으로 끌 수 있음)
     python -m foot_engine.stl_foot_extract.cli texture-extract project_232.glb --out project_232_clean.glb
 """
 
@@ -34,6 +35,8 @@ import sys
 from pathlib import Path
 
 import trimesh
+
+from foot_engine.sfm.dense import finalize_mesh
 
 from .branch_cut import suggest_bend_components
 from .finishing import postprocess_mesh
@@ -77,6 +80,29 @@ def _add_common_postprocess_args(parser: argparse.ArgumentParser) -> None:
                               "결과를 확인하며 쓸 것(절단면과 헷갈릴 소지 있음).")
     parser.add_argument("--fill-round-holes-min-circularity", type=float, default=0.7,
                          help="--fill-round-holes일 때 이 원형도 이상만 메움(기본 0.7, 1.0=완전한 원)")
+
+
+def _add_common_align_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--no-align", dest="align", action="store_false",
+                         help="정렬(축 정렬 + 스케일 + 바닥 접지, sfm.dense.finalize_mesh)을 끈다. 기본 켜짐.")
+    parser.add_argument("--reference-length-mm", type=float, default=None,
+                         help="자기신고 발길이(mm) -- 없으면 placeholder 250mm 기준(절대 축척 아님, 경고 출력).")
+    parser.add_argument("--trim-leg", action="store_true",
+                         help="정렬 전 다리(정강이)까지 찍힌 패턴이 뚜렷하면 잘라낸다. 기본 꺼짐 -- "
+                              "소수 사례로만 검증됨, 애매한 케이스를 과잉절단할 수 있음.")
+    parser.set_defaults(align=True)
+
+
+def _apply_align(mesh: trimesh.Trimesh, args: argparse.Namespace, out_path: Path) -> trimesh.Trimesh:
+    # glTF(.glb/.gltf) 스펙은 Y-up이 규약이라, finalize_mesh() 기본값인 Z-up(STL/슬라이서 관례)으로
+    # 내보내면 표준을 지키는 뷰어에서 다시 옆으로 누운 것처럼 보인다 -- 확장자로 분기.
+    z_up = out_path.suffix.lower() not in (".glb", ".gltf")
+    aligned, scale_factor = finalize_mesh(
+        mesh, reference_length_mm=args.reference_length_mm, trim_leg=args.trim_leg, z_up=z_up,
+    )
+    up_axis = "Z" if z_up else "Y"
+    print(f"[align] 정렬 완료(x{scale_factor:.4f} 스케일, {up_axis}-up, 발바닥={up_axis}0)")
+    return aligned
 
 
 def cmd_suggest(args: argparse.Namespace) -> int:
@@ -137,8 +163,10 @@ def cmd_texture_extract(args: argparse.Namespace) -> int:
             fill_round_holes_enabled=args.fill_round_holes,
             fill_round_holes_min_circularity=args.fill_round_holes_min_circularity,
         )
-
     out_path = args.out or args.mesh.with_name(f"{args.mesh.stem}_extracted{args.mesh.suffix}")
+    if args.align:
+        out_mesh = _apply_align(out_mesh, args, out_path)
+
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_mesh.export(out_path)
     print(f"[texture-extract] 저장: {out_path} (정점 {len(out_mesh.vertices):,}개, 면 {len(out_mesh.faces):,}개)")
@@ -203,6 +231,9 @@ def cmd_extract(args: argparse.Namespace) -> int:
         out_mesh = result.mesh
 
     out_path = args.out or args.mesh.with_name(f"{args.mesh.stem}_extracted{args.mesh.suffix}")
+    if args.align:
+        out_mesh = _apply_align(out_mesh, args, out_path)
+
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_mesh.export(out_path)
     print(f"[extract] 저장: {out_path} (정점 {len(out_mesh.vertices):,}개, 면 {len(out_mesh.faces):,}개)")
@@ -241,6 +272,7 @@ def main(argv: list[str] | None = None) -> int:
     p_tex.add_argument("--close-gap-radius", type=float, default=12.0,
                         help="빈틈 닫힘(팽창-침식) 반경, 전형적 정점 간격의 배수(기본 12, 0=끔)")
     _add_common_postprocess_args(p_tex)
+    _add_common_align_args(p_tex)
     p_tex.set_defaults(func=cmd_texture_extract)
 
     p_pick = sub.add_parser("pick", help="씨앗점 피커(로컬 HTML, 자동 구역 힌트 포함)를 연다")
@@ -272,6 +304,7 @@ def main(argv: list[str] | None = None) -> int:
     p_extract.add_argument("--min-vertices", type=int, default=30,
                             help="--component-index일 때 이보다 작은 조각은 무시(기본 30, component-pick과 맞출 것)")
     _add_common_postprocess_args(p_extract)
+    _add_common_align_args(p_extract)
     p_extract.set_defaults(func=cmd_extract)
 
     args = parser.parse_args(argv)
