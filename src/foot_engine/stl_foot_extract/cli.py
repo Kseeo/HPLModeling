@@ -69,6 +69,14 @@ def _add_common_postprocess_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--sand-iterations", type=int, default=3, help="사포질 반복 횟수(기본 3).")
     parser.add_argument("--curvature-iterations", type=int, default=150, help="고곡률 스무딩 반복 횟수(기본 150).")
     parser.add_argument("--finish-smooth-iterations", type=int, default=40, help="마감 라플라시안 반복 횟수(기본 40).")
+    parser.add_argument("--fill-holes-max-diameter-ratio", type=float, default=0.05,
+                         help="이 비율(메쉬 전체 대각선 대비) 이하인 구멍만 메움(기본 0.05). "
+                              "발목 절단면처럼 원래 열려있어야 하는 큰 구멍까지 메우지 않도록 낮게 유지할 것.")
+    parser.add_argument("--fill-round-holes", action="store_true",
+                         help="원형 구멍(단순 미관측 결손 추정)은 크더라도 자동으로 메움. 기본 꺼짐 -- "
+                              "결과를 확인하며 쓸 것(절단면과 헷갈릴 소지 있음).")
+    parser.add_argument("--fill-round-holes-min-circularity", type=float, default=0.7,
+                         help="--fill-round-holes일 때 이 원형도 이상만 메움(기본 0.7, 1.0=완전한 원)")
 
 
 def cmd_suggest(args: argparse.Namespace) -> int:
@@ -125,6 +133,9 @@ def cmd_texture_extract(args: argparse.Namespace) -> int:
             sand_iterations=args.sand_iterations,
             curvature_iterations=args.curvature_iterations,
             finish_smooth_iterations=args.finish_smooth_iterations,
+            fill_holes_max_diameter_ratio=args.fill_holes_max_diameter_ratio,
+            fill_round_holes_enabled=args.fill_round_holes,
+            fill_round_holes_min_circularity=args.fill_round_holes_min_circularity,
         )
 
     out_path = args.out or args.mesh.with_name(f"{args.mesh.stem}_extracted{args.mesh.suffix}")
@@ -167,6 +178,9 @@ def cmd_extract(args: argparse.Namespace) -> int:
                 sand_iterations=args.sand_iterations,
                 curvature_iterations=args.curvature_iterations,
                 finish_smooth_iterations=args.finish_smooth_iterations,
+                fill_holes_max_diameter_ratio=args.fill_holes_max_diameter_ratio,
+                fill_round_holes_enabled=args.fill_round_holes,
+                fill_round_holes_min_circularity=args.fill_round_holes_min_circularity,
             )
     else:
         seed_point = _parse_point(args.seed_point) if args.seed_point else None
@@ -181,6 +195,9 @@ def cmd_extract(args: argparse.Namespace) -> int:
                 sand_iterations=args.sand_iterations,
                 curvature_iterations=args.curvature_iterations,
                 finish_smooth_iterations=args.finish_smooth_iterations,
+                fill_holes_max_diameter_ratio=args.fill_holes_max_diameter_ratio,
+                fill_round_holes_enabled=args.fill_round_holes,
+                fill_round_holes_min_circularity=args.fill_round_holes_min_circularity,
             ),
         )
         out_mesh = result.mesh

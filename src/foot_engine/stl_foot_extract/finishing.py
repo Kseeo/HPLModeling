@@ -94,6 +94,76 @@ def fill_small_holes(
     return out, len(small_holes)
 
 
+def _hole_diag_and_circularity(mesh: trimesh.Trimesh, loop: list[int]) -> tuple[float, float]:
+    """구멍 경계 루프 하나의 (bbox 대각선, 원형도) -- 원형도는 4π·면적/둘레², 원이면 1.0."""
+    pts = mesh.vertices[loop]
+    centroid = pts.mean(axis=0)
+    c = pts - centroid
+    _, evecs = np.linalg.eigh(c.T @ c)
+    pts2d = c @ evecs[:, 1:]  # 최소 고유값(법선) 축 제외한 평면 2축에 투영
+    x, y = pts2d[:, 0], pts2d[:, 1]
+    area = 0.5 * abs(np.dot(x, np.roll(y, 1)) - np.dot(y, np.roll(x, 1)))
+    perimeter = float(np.linalg.norm(np.diff(np.vstack([pts, pts[0]]), axis=0), axis=1).sum())
+    circularity = 4 * np.pi * area / (perimeter**2 + 1e-12)
+    diag = float(np.linalg.norm(pts.max(axis=0) - pts.min(axis=0)))
+    return diag, circularity
+
+
+def fill_round_holes(
+    mesh: trimesh.Trimesh,
+    *,
+    min_circularity: float = 0.7,
+    max_hole_diameter_ratio: float = 0.6,
+    use_fan: bool = True,
+) -> tuple[trimesh.Trimesh, int]:
+    """둥근 구멍(단순 미관측 결손으로 추정)만 크기와 무관하게 메운다.
+
+    `fill_small_holes()`는 크기 하나로만 판단해 발목 절단면처럼 원래 열려
+    있어야 할 큰 구멍과 큰 미관측 구멍을 구분 못 한다. 실측 확인(project_228):
+    절단면은 원형도 0.39, 단순 결손 구멍은 0.92로 뚜렷이 갈렸다 -- 다만
+    project_229처럼 애매한 케이스(원형도 0.29, 눈으로는 메워도 됐어 보였지만
+    절단면과 비슷하게 낮음)도 있어 `min_circularity` 기본값을 보수적으로
+    0.7로 잡았다. 그래도 애매하면 안 메워지니 `fill_small_holes()`처럼
+    `max_hole_diameter_ratio`(기본 0.6, 매우 큰 안전판)와 함께 쓸 것 --
+    사람이 결과를 보고 필요하면 낮춰서 수동으로 더 메울 수 있다.
+    """
+    if len(mesh.faces) < 3 or mesh.is_watertight:
+        return mesh, 0
+
+    boundary_groups = trimesh.grouping.group_rows(mesh.edges_sorted, require_count=1)
+    if len(boundary_groups) < 3:
+        return mesh, 0
+
+    boundary = mesh.edges[boundary_groups]
+    holes = nx.cycle_basis(nx.from_edgelist(boundary))
+    if not holes:
+        return mesh, 0
+
+    mesh_diag = float(np.linalg.norm(mesh.bounds[1] - mesh.bounds[0]))
+    max_diag = mesh_diag * max_hole_diameter_ratio
+    round_holes = []
+    for loop in holes:
+        diag, circularity = _hole_diag_and_circularity(mesh, loop)
+        if diag <= max_diag and circularity >= min_circularity:
+            round_holes.append(loop)
+    if not round_holes:
+        return mesh, 0
+
+    new_faces = trimesh.geometry.triangulate_quads(round_holes, use_fan=use_fan)
+    if len(new_faces) == 0:
+        return mesh, 0
+
+    new_edges = trimesh.geometry.faces_to_edges(new_faces)
+    hashable_new = trimesh.grouping.hashable_rows(new_edges)
+    hashable_old = trimesh.grouping.hashable_rows(boundary)
+    needs_reverse = np.isin(hashable_new, hashable_old).reshape((-1, 3)).any(axis=1)
+    new_faces[needs_reverse] = np.fliplr(new_faces[needs_reverse])
+
+    out = mesh.copy()
+    out.extend_faces(new_faces)
+    return out, len(round_holes)
+
+
 def _ring_neighbors_padded(
     adjacency: list, *, min_neighbors: int, max_neighbors: int
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -299,6 +369,7 @@ class PostprocessStats:
     faces_before: int = 0
     faces_after_largest_component: int = 0
     n_holes_filled: int = 0
+    n_round_holes_filled: int = 0
     steps_applied: list[str] = field(default_factory=list)
 
 
@@ -308,6 +379,9 @@ def postprocess_mesh(
     keep_largest: bool = True,
     fill_holes: bool = True,
     fill_holes_max_diameter_ratio: float = 0.05,
+    fill_round_holes_enabled: bool = False,
+    fill_round_holes_min_circularity: float = 0.7,
+    fill_round_holes_max_diameter_ratio: float = 0.6,
     sand_surface_enabled: bool = True,
     sand_min_neighbors: int = 16,
     sand_max_neighbors: int = 32,
@@ -328,6 +402,10 @@ def postprocess_mesh(
     Args:
         keep_largest(True): 가장 큰 연결 요소만 남기고 부유 파편 제거.
         fill_holes(True): 작은 구멍(핀홀)만 메움 -- 큰 구멍은 그대로.
+        fill_round_holes_enabled(False): 원형 구멍(단순 미관측 결손 추정)은
+            크더라도 메움(`fill_round_holes()` 참고) -- 발목 절단면처럼
+            원래 열려있어야 할 구멍과 헷갈릴 소지가 있어 아직 기본 꺼짐,
+            결과를 확인하며 쓸 것.
         sand_surface_enabled(True): 전체 정점 이차곡면 투영 노이즈 완화.
         smooth_high_curvature(True): 고곡률 영역 국소 Taubin 스무딩.
         finish_smooth(True): 라플라시안 마감 스무딩 -- 위 단계로 안 빠지는
@@ -353,6 +431,16 @@ def postprocess_mesh(
         if n_filled:
             print(f"[finishing] 작은 구멍 메움: {n_filled}개")
             stats.steps_applied.append("fill_small_holes")
+
+    if fill_round_holes_enabled:
+        mesh, n_round_filled = fill_round_holes(
+            mesh, min_circularity=fill_round_holes_min_circularity,
+            max_hole_diameter_ratio=fill_round_holes_max_diameter_ratio,
+        )
+        stats.n_round_holes_filled = n_round_filled
+        if n_round_filled:
+            print(f"[finishing] 원형 구멍 메움: {n_round_filled}개")
+            stats.steps_applied.append("fill_round_holes")
 
     if sand_surface_enabled:
         mesh = sand_surface(
