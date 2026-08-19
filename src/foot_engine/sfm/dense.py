@@ -751,102 +751,129 @@ def align_sole_down(
     return aligned
 
 
-def find_leg_cut_plane(
+def find_ankle_cut_height(
     mesh: trimesh.Trimesh,
     *,
-    n_bins: int = 50,
-    neck_ratio: float = 0.6,
-    recovery_ratio: float = 0.55,
-    min_side_bins: int = 6,
+    n_bins: int = 60,
+    smooth_window: int = 1,
+    exclude_top_ratio: float = 0.15,
+    rebound_lookahead_bins: int = 10,
+    rebound_ratio: float = 1.15,
+    extra_margin_bins: int = 3,
+    max_length_ratio: float = 0.40,
+    near_floor_ratio: float = 0.12,
     n_surface_samples: int = 20_000,
     rng: np.random.Generator | None = None,
-) -> tuple[np.ndarray, np.ndarray] | None:
-    """다리(정강이)까지 같이 찍힌 스캔에서 발목처럼 잘록해졌다가(neck) 다시
-    굵어진 채 관측 경계까지 안 가늘어지는(다리) 패턴을 찾아 자를 평면을 낸다.
+) -> float | None:
+    """`align_sole_down()` 직후(Y=높이축, 발바닥이 -Y 쪽) 호출 전제 -- 다리까지
+    찍힌 스캔에서 발목 높이를 찾는다.
 
-    발끝/뒤꿈치처럼 해부학적으로 가늘어지며 "끝나는" 패턴과 구분하려고,
-    목 이후 구간이 다시 굵어진 채로 경계까지 유지되는지(=해부학적 taper가
-    아니라 카메라 프레임에 잘린 것)를 확인한다. 패턴이 뚜렷하지 않으면
-    `None` -- 멀쩡한 발을 잘못 잘라내는 것보다 다리 포함 케이스를 놓치는
-    쪽이 안전하다는 원칙(`clean_dense_point_cloud`의 `max_protrusion_ratio`와
-    같은 태도).
+    높이(Y)를 구간으로 나눠 구간별 단면 폭(구간 내 XZ 중심 기준 반경의 90
+    퍼센타일)을 재면, 발(아래, 넓고 불규칙) -> 발목(잘록) -> 종아리 근육(다시
+    굵어짐) 순으로 폭이 오목한 패턴을 그린다. 발 쪽 정점(첫 1/3 구간)에서
+    최댓값을 찾은 뒤, 그 위쪽으로 훑으며 "국소 최솟값 다음 구간들에서 다시
+    확실히 굵어지는" 첫 지점을 찾는다 -- 발가락/뒤꿈치처럼 그냥 가늘어지며
+    끝나는 경우(다시 안 굵어짐)와 구분하기 위함.
 
-    길이축은 이 함수 안에서 표면적 균등 샘플로 다시 구한다 -- 정점을 쓰면
-    `align_sole_down()`과 같은 삼각화 밀도 편향이 생긴다.
+    이 국소 최솟값 지점을 바로 자르지는 않는다 -- 복사뼈(malleolus)가
+    거기서 살짝 더 올라간 곳에 튀어나와 있어서, 최솟값 지점 자체가 이미
+    복사뼈 바로 아래이거나 복사뼈를 관통하는 높이일 수 있다. 대신
+    반등을 확인하는 데 쓴 `rebound_lookahead_bins` 구간 안에서 폭이 실제로
+    가장 커지는 지점(반등의 정점)까지 올라간다 -- 반등 직후 잠깐 주춤하는
+    구간이 있으면(복사뼈 두 개가 서로 다른 높이에 튀어나온 경우 등) 그
+    잠깐의 주춤함에 속아 진짜 반등 정점 전에 멈추지 않도록.
+
+    그 반등 정점에서도 `extra_margin_bins`만큼 한 번 더 올라간 지점을
+    최종 발목 높이로 삼는다 -- 반등이 아주 미세해서(복사뼈 돌출이 작아
+    정점이 최솟값 바로 다음 구간인 경우) 위 보정만으로는 복사뼈 바로 위
+    몇 mm까지밖에 못 올라가는 사례가 있어, 여유를 더 두는 안전 마진.
+    관측 경계 바로 아래(`exclude_top_ratio`)는 후보에서 제외한다 --
+    카메라 프레임에 잘린 다리 끝단이 노이즈로 국소 최솟값처럼 보일 수
+    있어서다.
+
+    위 과정은 각 스캔의 국소적인 폭 곡선 모양(복사뼈/종아리 근육이
+    어디서 얼마나 튀어나왔는지)을 따라가므로, 스캔마다 그 모양이 다르면
+    "발끝부터 절단선까지"가 발 길이 대비 서로 다른 비율이 될 수 있다
+    (실측 결과 0.37~0.70로 거의 두 배 차이 -- 어떤 샘플은 발목 바로 위,
+    어떤 샘플은 종아리 중간까지 남는 문제). 이를 막기 위해 결과를
+    `max_length_ratio * 발_길이`로 한 번 더 상한을 씌운다 -- 발_길이는
+    바닥 근처(`near_floor_ratio`, 전체 높이의 하위 12%) 점들의 X축
+    범위로 근사한다(다리 포함 여부와 무관하게 발 부분만 잡힘).
+
+    이전 버전(`find_leg_cut_plane`, 삭제됨)은 다리+발을 합친 PCA 축을 다시
+    구해 그 축을 따라 훑었는데, 다리가 섞이면 그 축 자체가 다리 쪽으로
+    쏠려 신뢰할 수 없었다. `align_sole_down()`이 이미 발바닥 검출로 정한
+    Y축은 다리 포함 여부와 무관하게 안정적이라 이 축을 그대로 쓴다.
 
     Returns:
-        `mesh.slice_plane()`에 그대로 넘기면 발 쪽(양의 normal 방향)만
-        남는 (plane_origin, plane_normal). 확신이 없으면 `None`.
+        자를 높이(Y, `mesh` 기준). 패턴이 뚜렷하지 않으면 `None` -- 멀쩡한
+        발을 잘못 잘라내는 것보다 다리 포함 케이스를 놓치는 쪽이 안전하다는
+        원칙(`clean_dense_point_cloud`의 `max_protrusion_ratio`와 같은 태도).
     """
     if rng is None:
         rng = np.random.default_rng(0)
     surface_points, _ = trimesh.sample.sample_surface(mesh, n_surface_samples, seed=rng)
-    centroid = surface_points.mean(axis=0)
-    c = surface_points - centroid
-    length_axis = pca_axes(c)[:, 0]
+    x = surface_points[:, 0]
+    y = surface_points[:, 1]
+    xz = surface_points[:, [0, 2]]
 
-    t = c @ length_axis
-    perp = c - np.outer(t, length_axis)
-    r = np.linalg.norm(perp, axis=1)
-    edges = np.linspace(t.min(), t.max(), n_bins + 1)
-    idx = np.clip(np.digitize(t, edges) - 1, 0, n_bins - 1)
+    floor_thresh = y.min() + near_floor_ratio * (y.max() - y.min())
+    near_floor = y <= floor_thresh
+    foot_length = float(x[near_floor].max() - x[near_floor].min()) if near_floor.sum() > 20 else None
+
+    edges = np.linspace(y.min(), y.max(), n_bins + 1)
+    idx = np.clip(np.digitize(y, edges) - 1, 0, n_bins - 1)
     widths = np.full(n_bins, np.nan)
     for b in range(n_bins):
-        sel = r[idx == b]
+        sel = xz[idx == b]
         if len(sel) > 20:
-            widths[b] = np.percentile(sel, 90)
+            bin_centroid = sel.mean(axis=0)
+            widths[b] = np.percentile(np.linalg.norm(sel - bin_centroid, axis=1), 90)
     centers = (edges[:-1] + edges[1:]) / 2
 
-    # 양쪽 방향(어느 쪽이 발 끝인지 모르므로) 다 검사해 더 뚜렷한 쪽을 채택.
-    best: tuple[float, float, float] | None = None
-    for keep_sign, order in ((1.0, range(n_bins - 1, -1, -1)), (-1.0, range(n_bins))):
-        valid = [i for i in order if not np.isnan(widths[i])]
-        if len(valid) < min_side_bins * 2:
-            continue
-        # 양끝 taper 자체를 목으로 오인하지 않도록 중간 70% 범위에서만 찾는다.
-        mid_lo, mid_hi = int(len(valid) * 0.15), int(len(valid) * 0.85)
-        mid_candidates = valid[mid_lo:mid_hi]
-        if not mid_candidates:
-            continue
-        neck_i = min(mid_candidates, key=lambda i: widths[i])
-        pos = valid.index(neck_i)
-        before, after = valid[: pos + 1], valid[pos:]
-        if len(before) < min_side_bins or len(after) < min_side_bins:
-            continue
-        w_before_max = max(widths[i] for i in before)
-        w_neck = widths[neck_i]
-        w_tail_end = float(np.mean([widths[i] for i in after[-min_side_bins:]]))
-        if (
-            w_neck <= neck_ratio * w_before_max
-            and w_tail_end >= recovery_ratio * w_before_max
-            and w_tail_end >= w_neck * 1.3
-        ):
-            score = w_before_max - w_neck
-            if best is None or score > best[0]:
-                best = (score, keep_sign, centers[neck_i])
-
-    if best is None:
+    valid = np.where(~np.isnan(widths))[0]
+    n = len(valid)
+    if n < rebound_lookahead_bins * 3:
         return None
-    _, keep_sign, neck_t = best
-    plane_origin = centroid + neck_t * length_axis
-    plane_normal = keep_sign * length_axis
-    return plane_origin, plane_normal
+    w = widths[valid]
+    if smooth_window > 1:
+        kernel = np.ones(smooth_window) / smooth_window
+        w = np.convolve(w, kernel, mode="same")
+
+    peak_pos = int(np.argmax(w[: max(n // 3, 3)]))
+    search_hi = int(n * (1 - exclude_top_ratio))
+    for i in range(peak_pos + 1, search_hi):
+        if w[i] <= w[i - 1] and w[i] <= w[i + 1]:
+            lookahead = w[i + 1: min(i + 1 + rebound_lookahead_bins, n)]
+            if len(lookahead) and lookahead.max() >= w[i] * rebound_ratio:
+                bump_i = i + 1 + int(np.argmax(lookahead))  # 반등 구간 안의 실제 정점
+                final_i = min(bump_i + extra_margin_bins, search_hi - 1, n - 1)
+                cut_height = float(centers[valid[final_i]])
+                if foot_length is not None:
+                    cut_height = min(cut_height, max_length_ratio * foot_length)
+                return cut_height
+    return None
 
 
-def trim_leg_segment(mesh: trimesh.Trimesh, **kwargs) -> trimesh.Trimesh:
-    """`find_leg_cut_plane()`으로 다리 포함 패턴이 확인되면 잘라내고, 아니면
-    원본 그대로 반환한다(패턴이 애매하면 아무것도 안 함).
+def trim_leg_above_ankle(mesh: trimesh.Trimesh, **kwargs) -> trimesh.Trimesh:
+    """`align_sole_down()` 직후(Y=높이축) 호출 전제 -- `find_ankle_cut_height()`로
+    다리 포함 패턴이 확인되면 발목 높이에서 잘라내고, 아니면 원본 그대로
+    반환한다(패턴이 애매하면 아무것도 안 함).
     """
-    cut = find_leg_cut_plane(mesh, **kwargs)
-    if cut is None:
+    cut_y = find_ankle_cut_height(mesh, **kwargs)
+    if cut_y is None:
         return mesh
-    plane_origin, plane_normal = cut
-    trimmed = mesh.slice_plane(plane_origin, plane_normal, cap=True)
+    trimmed = mesh.slice_plane([0.0, cut_y, 0.0], [0.0, -1.0, 0.0], cap=True)
     if trimmed is None or len(trimmed.vertices) == 0:
         print("[trim] 다리 패턴이 감지됐지만 자르기 결과가 비어 원본을 유지합니다")
         return mesh
+    # slice_plane 절단면 근처에서 원래 몸통과 얇게만 이어져 있던 부분이
+    # 떨어져 나가 부유 조각이 될 수 있다 -- 절단 직후 다시 한번 정리.
+    trimmed, faces_before, faces_after = keep_largest_component(trimmed)
+    if faces_after < faces_before:
+        print(f"[trim] 절단 후 부유 조각 제거: 면 {faces_before:,} -> {faces_after:,}")
     print(
-        f"[trim] 다리 포함 패턴 감지 -- 발목 지점에서 잘라냄 "
+        f"[trim] 다리 포함 패턴 감지 -- 발목 높이(Y={cut_y:.4g})에서 잘라냄 "
         f"(정점 {len(mesh.vertices):,} -> {len(trimmed.vertices):,})"
     )
     return trimmed
@@ -906,18 +933,22 @@ def finalize_mesh(
     Args:
         z_up: 기본 True -- 내부적으로는 Y=높이로 계산하지만, 최종 결과는
             `to_z_up()`으로 Z=높이 좌표계로 내보낸다(대부분의 뷰어 관례).
-        trim_leg(False): 발목 위 다리까지 찍혀 축 정렬이 다리 쪽으로 쏠리는
-            케이스를 겨냥해 `trim_leg_segment()`로 다리를 잘라내고 정렬한다.
-            패턴이 뚜렷할 때만 자르지만(`find_leg_cut_plane()` 참고), 아직
-            소수 사례로만 검증돼 기본은 꺼짐 -- 다리가 안 찍힌 정상 스캔에는
-            영향 없어야 하나 더 검증 전까지는 필요할 때만 켤 것.
+        trim_leg(False): 발목 위 다리까지 찍힌 스캔에서 `trim_leg_above_ankle()`로
+            다리를 잘라낸다(정렬 뒤, `align_sole_down()`이 정한 Y=높이축 기준 --
+            발목 높이 검출은 이 축이 먼저 정해져야 신뢰할 수 있다). 패턴이
+            뚜렷할 때만 자르지만(`find_ankle_cut_height()` 참고), 다리가 안
+            찍힌 정상 스캔에는 영향 없어야 함.
 
     Returns:
         (정렬/스케일/접지 완료된 메쉬, 적용된 스케일 배율)
     """
-    if trim_leg:
-        mesh = trim_leg_segment(mesh)
+    mesh, faces_before, faces_after = keep_largest_component(mesh)
+    if faces_after < faces_before:
+        print(f"[정리] 몸통과 떨어진 부유 조각 제거: 면 {faces_before:,} -> {faces_after:,}")
+
     mesh = align_sole_down(mesh)
+    if trim_leg:
+        mesh = trim_leg_above_ankle(mesh)
 
     resolved_reference_length_mm = reference_length_mm
     if resolved_reference_length_mm is None:
