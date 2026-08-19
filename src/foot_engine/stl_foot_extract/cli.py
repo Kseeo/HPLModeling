@@ -3,7 +3,14 @@
 
 사용 예::
 
-    # 씨앗점 피커 열기(자동 후보 힌트 포함)
+    # 이미 분리된 조각을 색으로 보여주는 피커(가장 신뢰도 높은 경로 -- 우선 시도할 것)
+    python -m foot_engine.stl_foot_extract.cli component-pick project_229.stl
+
+    # 피커에서 고른 조각 번호로 추출 + 정리
+    python -m foot_engine.stl_foot_extract.cli extract project_229.stl \\
+        --component-index 0 --out project_229_clean.stl
+
+    # 씨앗점 피커 열기(자동 후보 힌트 포함) -- 조각이 발과 fuse돼 안 나뉠 때
     python -m foot_engine.stl_foot_extract.cli pick project_229.stl
 
     # 사람이 피커에서 확인한 좌표로 크롭 + 정리
@@ -15,6 +22,9 @@
 
     # 후보만 출력(크롭 없이)
     python -m foot_engine.stl_foot_extract.cli suggest project_229.stl
+
+    # 색/텍스처 있는 입력(GLB 등)은 다중뷰 피부분할 투표로 자동 크롭(가장 신뢰도 높음)
+    python -m foot_engine.stl_foot_extract.cli texture-extract project_232.glb --out project_232_clean.glb
 """
 
 from __future__ import annotations
@@ -25,9 +35,12 @@ from pathlib import Path
 
 import trimesh
 
-from .locate import find_dense_regions
-from .picker import open_picker
+from .branch_cut import suggest_bend_components
+from .finishing import postprocess_mesh
+from .locate import find_dense_regions, list_components
+from .picker import open_component_picker, open_picker
 from .pipeline import extract_foot
+from .texture_crop import extract_by_skin_vote, load_textured_mesh
 
 # cp949 등 비-UTF8 콘솔에서 한글 출력이 깨지거나 죽는 문제 방지 -- scripts/_cli_common.py와
 # 같은 부작용이지만, 이 패키지는 scripts/에 의존하지 않아야 해서 여기 자체적으로 둔다.
@@ -73,8 +86,63 @@ def cmd_suggest(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_bend_split(args: argparse.Namespace) -> int:
+    mesh = trimesh.load(args.mesh, process=True)
+    components = suggest_bend_components(
+        mesh, corner_angle_deg=args.corner_angle, tip_top_k=args.top_k,
+    )
+    if len(components) <= 1:
+        print("코너를 못 찾아 조각이 안 갈라졌습니다(직선으로 곧게 이어진 형태이거나 임계각이 너무 큼).")
+        return 1
+
+    out_dir = args.out_dir or args.mesh.with_name(f"{args.mesh.stem}_bend_parts")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for i, c in enumerate(components):
+        out_path = out_dir / f"part{i+1}.stl"
+        c.mesh.export(out_path)
+        dx, dy, dz = c.bbox_size
+        print(
+            f"#{i+1} {out_path.name}: 정점 {c.n_vertices:,}개, "
+            f"bbox=({dx:.4f}, {dy:.4f}, {dz:.4f}) "
+            f"구형성={c.sphericity_score:.2f} 다지구조={c.toe_score:.2f}"
+        )
+    print(f"[bend-split] {len(components)}개 조각을 {out_dir}에 저장했습니다 -- 열어보고 발인 조각을 고르세요.")
+    return 0
+
+
+def cmd_texture_extract(args: argparse.Namespace) -> int:
+    mesh = load_textured_mesh(args.mesh)
+    print(f"[texture-extract] 입력: {args.mesh} (정점 {len(mesh.vertices):,}개)")
+
+    result = extract_by_skin_vote(
+        mesh, n_views=args.n_views, resolution=(args.resolution, int(args.resolution * 0.75)),
+        vote_threshold=args.vote_threshold, close_gap_radius_mult=args.close_gap_radius,
+    )
+    out_mesh = result.mesh
+    if args.postprocess:
+        out_mesh, _ = postprocess_mesh(
+            out_mesh,
+            sand_iterations=args.sand_iterations,
+            curvature_iterations=args.curvature_iterations,
+            finish_smooth_iterations=args.finish_smooth_iterations,
+        )
+
+    out_path = args.out or args.mesh.with_name(f"{args.mesh.stem}_extracted{args.mesh.suffix}")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_mesh.export(out_path)
+    print(f"[texture-extract] 저장: {out_path} (정점 {len(out_mesh.vertices):,}개, 면 {len(out_mesh.faces):,}개)")
+    return 0
+
+
 def cmd_pick(args: argparse.Namespace) -> int:
     open_picker(args.mesh, n_regions=args.top_k, auto_open=not args.no_open)
+    return 0
+
+
+def cmd_component_pick(args: argparse.Namespace) -> int:
+    open_component_picker(
+        args.mesh, min_component_vertices=args.min_vertices, auto_open=not args.no_open,
+    )
     return 0
 
 
@@ -82,27 +150,45 @@ def cmd_extract(args: argparse.Namespace) -> int:
     mesh = trimesh.load(args.mesh, process=True)
     print(f"[extract] 입력: {args.mesh} (정점 {len(mesh.vertices):,}개, 면 {len(mesh.faces):,}개)")
 
-    seed_point = _parse_point(args.seed_point) if args.seed_point else None
-    result = extract_foot(
-        mesh,
-        seed_point=seed_point,
-        crop_radius=args.crop_radius,
-        auto=args.auto,
-        region_index=args.region_index,
-        postprocess=args.postprocess,
-        postprocess_kwargs=dict(
-            sand_iterations=args.sand_iterations,
-            curvature_iterations=args.curvature_iterations,
-            finish_smooth_iterations=args.finish_smooth_iterations,
-        ),
-    )
+    if args.component_index is not None:
+        comps = list_components(mesh, min_vertices=args.min_vertices)
+        if args.component_index >= len(comps):
+            print(f"[extract] component-index={args.component_index}, 조각은 {len(comps)}개뿐입니다.")
+            return 1
+        chosen = comps[args.component_index]
+        print(
+            f"[extract] 조각 #{args.component_index+1} 선택: 정점 {chosen.n_vertices:,}개, "
+            f"bbox={chosen.bbox_size.round(4).tolist()}"
+        )
+        out_mesh = chosen.mesh
+        if args.postprocess:
+            out_mesh, _ = postprocess_mesh(
+                out_mesh, keep_largest=False,  # 이미 단일 연결요소이니 재분리 불필요
+                sand_iterations=args.sand_iterations,
+                curvature_iterations=args.curvature_iterations,
+                finish_smooth_iterations=args.finish_smooth_iterations,
+            )
+    else:
+        seed_point = _parse_point(args.seed_point) if args.seed_point else None
+        result = extract_foot(
+            mesh,
+            seed_point=seed_point,
+            crop_radius=args.crop_radius,
+            auto=args.auto,
+            region_index=args.region_index,
+            postprocess=args.postprocess,
+            postprocess_kwargs=dict(
+                sand_iterations=args.sand_iterations,
+                curvature_iterations=args.curvature_iterations,
+                finish_smooth_iterations=args.finish_smooth_iterations,
+            ),
+        )
+        out_mesh = result.mesh
+
     out_path = args.out or args.mesh.with_name(f"{args.mesh.stem}_extracted{args.mesh.suffix}")
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    result.mesh.export(out_path)
-    print(
-        f"[extract] 저장: {out_path} (정점 {len(result.mesh.vertices):,}개, "
-        f"면 {len(result.mesh.faces):,}개)"
-    )
+    out_mesh.export(out_path)
+    print(f"[extract] 저장: {out_path} (정점 {len(out_mesh.vertices):,}개, 면 {len(out_mesh.faces):,}개)")
     return 0
 
 
@@ -118,11 +204,42 @@ def main(argv: list[str] | None = None) -> int:
     p_suggest.add_argument("--top-k", type=int, default=5)
     p_suggest.set_defaults(func=cmd_suggest)
 
+    p_bend = sub.add_parser("bend-split", help="말단에서 꺾이는 지점(코너)을 찾아 조각으로 나눠 각각 저장")
+    p_bend.add_argument("mesh", type=Path)
+    p_bend.add_argument("--out-dir", type=Path, default=None)
+    p_bend.add_argument("--corner-angle", type=float, default=55.0, help="코너 판정 임계각(도, 기본 55)")
+    p_bend.add_argument("--top-k", type=int, default=6, help="탐색할 말단 개수(기본 6)")
+    p_bend.set_defaults(func=cmd_bend_split)
+
+    p_tex = sub.add_parser(
+        "texture-extract",
+        help="색/텍스처 있는 입력(GLB 등)에서 다중뷰 피부분할 투표로 발을 자동 크롭(가장 신뢰도 높음)",
+    )
+    p_tex.add_argument("mesh", type=Path)
+    p_tex.add_argument("--out", type=Path, default=None)
+    p_tex.add_argument("--n-views", type=int, default=16, help="가상 카메라 개수(기본 16)")
+    p_tex.add_argument("--resolution", type=int, default=640, help="렌더 가로 해상도(기본 640, 세로는 0.75배)")
+    p_tex.add_argument("--vote-threshold", type=float, default=0.5,
+                        help="관측된 뷰 중 이 비율 이상 피부로 보여야 채택(기본 0.5)")
+    p_tex.add_argument("--close-gap-radius", type=float, default=12.0,
+                        help="빈틈 닫힘(팽창-침식) 반경, 전형적 정점 간격의 배수(기본 12, 0=끔)")
+    _add_common_postprocess_args(p_tex)
+    p_tex.set_defaults(func=cmd_texture_extract)
+
     p_pick = sub.add_parser("pick", help="씨앗점 피커(로컬 HTML, 자동 구역 힌트 포함)를 연다")
     p_pick.add_argument("mesh", type=Path)
     p_pick.add_argument("--top-k", type=int, default=5, help="같이 표시할 자동 구역 개수(기본 5, 0=끔)")
     p_pick.add_argument("--no-open", action="store_true", help="생성 후 브라우저로 자동으로 열지 않는다")
     p_pick.set_defaults(func=cmd_pick)
+
+    p_comp_pick = sub.add_parser(
+        "component-pick",
+        help="이미 분리된 연결 요소를 색으로 구분해 보여주고 사람이 고르게 하는 피커를 연다",
+    )
+    p_comp_pick.add_argument("mesh", type=Path)
+    p_comp_pick.add_argument("--min-vertices", type=int, default=30, help="이보다 작은 조각은 표시 안 함(기본 30)")
+    p_comp_pick.add_argument("--no-open", action="store_true", help="생성 후 브라우저로 자동으로 열지 않는다")
+    p_comp_pick.set_defaults(func=cmd_component_pick)
 
     p_extract = sub.add_parser("extract", help="발 부위를 크롭 + 정리해 저장")
     p_extract.add_argument("mesh", type=Path)
@@ -132,14 +249,21 @@ def main(argv: list[str] | None = None) -> int:
     p_extract.add_argument("--auto", action="store_true",
                             help="자동 구역으로 바로 크롭(휴리스틱, 결과 확인 필수) -- --seed-point 대안")
     p_extract.add_argument("--region-index", type=int, default=0, help="--auto일 때 몇 번째 구역을 쓸지(기본 0=1위)")
+    p_extract.add_argument("--component-index", type=int, default=None,
+                            help="component-pick으로 고른 조각 번호(0=1위) -- --seed-point/--auto 대안, "
+                                 "이미 분리된 조각을 그대로 쓸 때 가장 신뢰도 높음")
+    p_extract.add_argument("--min-vertices", type=int, default=30,
+                            help="--component-index일 때 이보다 작은 조각은 무시(기본 30, component-pick과 맞출 것)")
     _add_common_postprocess_args(p_extract)
     p_extract.set_defaults(func=cmd_extract)
 
     args = parser.parse_args(argv)
-    if args.command == "extract" and not args.auto and args.seed_point is None:
-        parser.error("extract는 --seed-point(+--crop-radius) 또는 --auto 중 하나가 필요합니다")
-    if args.command == "extract" and (args.seed_point is None) != (args.crop_radius is None):
-        parser.error("--seed-point와 --crop-radius는 같이 지정해야 합니다")
+    if args.command == "extract":
+        modes = [args.seed_point is not None, args.auto, args.component_index is not None]
+        if sum(modes) != 1:
+            parser.error("extract는 --seed-point(+--crop-radius) / --auto / --component-index 중 정확히 하나가 필요합니다")
+        if (args.seed_point is None) != (args.crop_radius is None):
+            parser.error("--seed-point와 --crop-radius는 같이 지정해야 합니다")
     return args.func(args)
 
 

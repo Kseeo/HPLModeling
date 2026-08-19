@@ -184,6 +184,41 @@ def suggest_foot_regions(
 
 
 @dataclass(slots=True)
+class MeshComponent:
+    """`list_components()`가 반환하는, 이미 공간적으로 분리된 연결 요소 하나."""
+
+    index: int
+    mesh: trimesh.Trimesh
+    n_vertices: int
+    bbox_size: np.ndarray
+    centroid: np.ndarray
+    sphericity_score: float
+    toe_score: float
+
+
+def list_components(mesh: trimesh.Trimesh, *, min_vertices: int = 30) -> list[MeshComponent]:
+    """공간적으로 이미 분리된 연결 요소를 정점 수 내림차순으로 나열한다.
+
+    `finishing.keep_largest_component()`는 이 중 1번(가장 큰 것)만 자동으로
+    선택하는데, 배경 물체가 발보다 더 크면(예: 의자 좌판) 잘못 선택될 수
+    있다 -- 사람이 `picker.py`로 직접 확인해서 고를 때 쓴다.
+    """
+    pieces = sorted(mesh.split(only_watertight=False), key=lambda p: len(p.vertices), reverse=True)
+    out: list[MeshComponent] = []
+    for piece in pieces:
+        if len(piece.vertices) < min_vertices:
+            continue
+        pts = piece.vertices
+        centroid = pts.mean(axis=0)
+        out.append(MeshComponent(
+            index=len(out), mesh=piece, n_vertices=len(pts),
+            bbox_size=piece.bounds[1] - piece.bounds[0], centroid=centroid,
+            sphericity_score=_sphericity(pts), toe_score=_toe_cluster_score(pts, centroid),
+        ))
+    return out
+
+
+@dataclass(slots=True)
 class DenseRegion:
     """`find_dense_regions()`가 반환하는 "구역" 하나 -- 점 하나가 아니라
     공간적으로 뭉친 표면 샘플점 집합이라, 크롭할 때 그 실제(구가 아닌) 모양을
