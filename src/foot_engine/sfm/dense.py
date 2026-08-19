@@ -56,6 +56,7 @@ from .mesh_postprocess import (
     DEFAULT_CURVATURE_MU,
     DEFAULT_CURVATURE_PERCENTILE,
     fill_small_holes,
+    finish_smooth_mesh,
     keep_largest_component,
     postprocess_mesh,
     prune_thin_protrusions,
@@ -918,12 +919,82 @@ def to_z_up(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
     return rotated
 
 
+def decimate_mesh(
+    mesh: trimesh.Trimesh,
+    *,
+    target_vertices: int,
+    smooth_after: bool = True,
+    smooth_lamb: float = 0.5,
+    smooth_iterations: int = 20,
+    max_tuning_iterations: int = 3,
+) -> trimesh.Trimesh:
+    """쿼드릭 에지 축약(quadric edge collapse)으로 정점 수를 `target_vertices`
+    근방까지 줄인다 -- GNN 학습 데이터(예: 논문 기준 mesh size=15, 정점
+    ~18,000개)와 해상도를 맞출 때 사용.
+
+    `trimesh.simplify_quadric_decimation()`은 목표를 면(face) 개수로 받는데,
+    정점 개수와 면 개수의 관계가 메쉬 형태마다 달라 한 번에 정확히 못 맞춘다
+    -- 삼각메쉬는 오일러 공식상 면이 정점의 약 2배(F ≈ 2V)라는 근사로 첫 값을
+    잡은 뒤, 실제 결과의 정점 수를 보고 목표 대비 비율만큼 면 개수를 보정해
+    최대 `max_tuning_iterations`번 다시 시도한다(매번 원본에서 다시 축약 --
+    이미 축약된 메쉬를 또 축약하면 품질이 누적으로 나빠짐).
+
+    축약은 국소적으로 뾰족한 아티팩트를 남기기 쉬워, 기본으로 가벼운
+    라플라시안 마감(`finish_smooth_mesh()`, 이미 파이프라인에서 쓰던 것
+    재사용)을 이어 붙인다.
+    """
+    n_before = len(mesh.vertices)
+    if n_before <= target_vertices:
+        print(f"[decimate] 이미 목표({target_vertices:,}) 이하(정점 {n_before:,}) -- 건너뜀")
+        return mesh
+
+    target_faces = target_vertices * 2
+    simplified = mesh
+    for _ in range(max_tuning_iterations):
+        simplified = mesh.simplify_quadric_decimation(face_count=target_faces)
+        n_after = len(simplified.vertices)
+        if n_after == 0:
+            break
+        ratio = target_vertices / n_after
+        if 0.9 <= ratio <= 1.1:
+            break
+        target_faces = max(int(target_faces * ratio), 4)
+
+    print(f"[decimate] 쿼드릭 단순화: 정점 {n_before:,} -> {len(simplified.vertices):,} "
+          f"(목표 {target_vertices:,})")
+    if smooth_after:
+        simplified = finish_smooth_mesh(simplified, lamb=smooth_lamb, iterations=smooth_iterations)
+    return simplified
+
+
+def find_floor_contact_mask(
+    mesh: trimesh.Trimesh,
+    *,
+    tolerance_mm: float = 2.0,
+    up_axis: int = 2,
+) -> np.ndarray:
+    """바닥(Y=0 또는 Z=0, `up_axis`로 지정)에서 `tolerance_mm` 이내인 정점을
+    "접지 노드"로 표시한 불리언 배열(정점 순서와 1:1 대응)을 반환한다.
+
+    `rest_on_floor()`가 이미 발바닥을 0 근방에 붙여놨다는 전제 -- 즉
+    `finalize_mesh()` 이후(스케일까지 끝나 `tolerance_mm`이 실제 mm 단위로
+    맞는) 메쉬에 대해서만 의미가 있다. `up_axis`는 기본 2(Z) --
+    `finalize_mesh(z_up=True)` 기본값과 맞춤; Y=높이 메쉬라면 1을 넘길 것.
+    """
+    heights = mesh.vertices[:, up_axis]
+    mask = heights <= (heights.min() + tolerance_mm)
+    print(f"[floor-contact] 접지 노드 {int(mask.sum()):,}/{len(mask):,}개 "
+          f"({100 * mask.mean():.1f}%, 허용오차 {tolerance_mm:.1f}mm)")
+    return mask
+
+
 def finalize_mesh(
     mesh: trimesh.Trimesh,
     *,
     reference_length_mm: float | None = None,
     z_up: bool = True,
     trim_leg: bool = False,
+    target_vertices: int | None = None,
 ) -> tuple[trimesh.Trimesh, float]:
     """`run_dense_pipeline()`이 만든 원본 메쉬(임의 좌표계/임의 스케일)를
     축 정렬 + 스케일링 + 바닥 정착까지 마친 최종 메쉬로 만든다.
@@ -938,6 +1009,10 @@ def finalize_mesh(
             발목 높이 검출은 이 축이 먼저 정해져야 신뢰할 수 있다). 패턴이
             뚜렷할 때만 자르지만(`find_ankle_cut_height()` 참고), 다리가 안
             찍힌 정상 스캔에는 영향 없어야 함.
+        target_vertices(None): 지정하면 `decimate_mesh()`로 이 정점 수 근방까지
+            단순화 + 마감 스무딩한다(예: 다른 데이터셋/모델의 해상도에 맞출 때).
+            단순화+스무딩이 바닥 접지를 살짝 흐트러뜨릴 수 있어, 그 뒤
+            `rest_on_floor()`를 한 번 더 적용해 바로잡는다.
 
     Returns:
         (정렬/스케일/접지 완료된 메쉬, 적용된 스케일 배율)
@@ -964,6 +1039,9 @@ def finalize_mesh(
         f"[스케일] 메쉬 자체 PCA 길이 {own_length:.4f}(SfM 임의 단위) -> "
         f"{resolved_reference_length_mm:.1f}mm 기준(x{scale_factor:.4f})"
     )
+
+    if target_vertices is not None:
+        mesh = decimate_mesh(mesh, target_vertices=target_vertices)
 
     mesh = rest_on_floor(mesh)
     if z_up:

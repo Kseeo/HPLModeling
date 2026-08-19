@@ -23,9 +23,14 @@
     # 후보만 출력(크롭 없이)
     python -m foot_engine.stl_foot_extract.cli suggest project_229.stl
 
-    # 색/텍스처 있는 입력(GLB 등)은 다중뷰 피부분할 투표로 자동 크롭(가장 신뢰도 높음)
-    # + 기본으로 축 정렬/스케일/바닥 접지(finalize_mesh)까지 적용됨(--no-align으로 끌 수 있음)
+    # 색/텍스처 있는 입력(GLB 등): 발 검출(다중뷰 피부투표) -> 정리/스무딩 -> 정렬/스케일/
+    # 바닥 접지까지 기본 적용(--no-align으로 끌 수 있음). 실제 구현은 postprocess_pipeline.py
+    # 의 process_glb_to_foot() -- CLI 아닌 코드에서 재사용할 땐 그 함수를 직접 호출할 것.
     python -m foot_engine.stl_foot_extract.cli texture-extract project_232.glb --out project_232_clean.glb
+
+    # 위 전체 체인 + 발목 절단 + 다른 데이터셋 해상도(정점 수) 맞춤 + 접지 노드 마스크까지
+    python -m foot_engine.stl_foot_extract.cli texture-extract project_232.glb \\
+        --out project_232_gnn.glb --trim-leg --target-vertices 18119 --floor-contact-tolerance-mm 2.0
 """
 
 from __future__ import annotations
@@ -34,16 +39,17 @@ import argparse
 import sys
 from pathlib import Path
 
+import numpy as np
 import trimesh
 
-from foot_engine.sfm.dense import finalize_mesh
+from foot_engine.sfm.dense import find_floor_contact_mask, finalize_mesh
 
 from .branch_cut import suggest_bend_components
 from .finishing import postprocess_mesh
 from .locate import find_dense_regions, list_components
 from .picker import open_component_picker, open_picker
 from .pipeline import extract_foot
-from .texture_crop import extract_by_skin_vote, load_textured_mesh
+from .postprocess_pipeline import export_result, process_glb_to_foot
 
 # cp949 등 비-UTF8 콘솔에서 한글 출력이 깨지거나 죽는 문제 방지 -- scripts/_cli_common.py와
 # 같은 부작용이지만, 이 패키지는 scripts/에 의존하지 않아야 해서 여기 자체적으로 둔다.
@@ -90,6 +96,13 @@ def _add_common_align_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--trim-leg", action="store_true",
                          help="정렬 전 다리(정강이)까지 찍힌 패턴이 뚜렷하면 잘라낸다. 기본 꺼짐 -- "
                               "소수 사례로만 검증됨, 애매한 케이스를 과잉절단할 수 있음.")
+    parser.add_argument("--target-vertices", type=int, default=None,
+                         help="지정하면 이 정점 수 근방까지 단순화(쿼드릭 축약)+마감 스무딩한다 "
+                              "-- 다른 데이터셋/모델의 메쉬 해상도에 맞출 때 사용.")
+    parser.add_argument("--floor-contact-tolerance-mm", type=float, default=None,
+                         help="지정하면 바닥(접지면)에서 이 거리(mm) 이내인 정점을 접지 노드로 "
+                              "표시해 '<out파일명>_floor_contact.npy'(정점 순서와 1:1 대응하는 "
+                              "불리언 배열)로 같이 저장한다. 기본 꺼짐.")
     parser.set_defaults(align=True)
 
 
@@ -99,9 +112,20 @@ def _apply_align(mesh: trimesh.Trimesh, args: argparse.Namespace, out_path: Path
     z_up = out_path.suffix.lower() not in (".glb", ".gltf")
     aligned, scale_factor = finalize_mesh(
         mesh, reference_length_mm=args.reference_length_mm, trim_leg=args.trim_leg, z_up=z_up,
+        target_vertices=args.target_vertices,
     )
     up_axis = "Z" if z_up else "Y"
     print(f"[align] 정렬 완료(x{scale_factor:.4f} 스케일, {up_axis}-up, 발바닥={up_axis}0)")
+
+    if args.floor_contact_tolerance_mm is not None:
+        mask = find_floor_contact_mask(
+            aligned, tolerance_mm=args.floor_contact_tolerance_mm, up_axis=2 if z_up else 1,
+        )
+        mask_path = out_path.with_name(f"{out_path.stem}_floor_contact.npy")
+        mask_path.parent.mkdir(parents=True, exist_ok=True)
+        np.save(mask_path, mask)
+        print(f"[floor-contact] 저장: {mask_path}")
+
     return aligned
 
 
@@ -145,31 +169,30 @@ def cmd_bend_split(args: argparse.Namespace) -> int:
 
 
 def cmd_texture_extract(args: argparse.Namespace) -> int:
-    mesh = load_textured_mesh(args.mesh)
-    print(f"[texture-extract] 입력: {args.mesh} (정점 {len(mesh.vertices):,}개)")
-
-    result = extract_by_skin_vote(
-        mesh, n_views=args.n_views, resolution=(args.resolution, int(args.resolution * 0.75)),
-        vote_threshold=args.vote_threshold, close_gap_radius_mult=args.close_gap_radius,
-    )
-    out_mesh = result.mesh
-    if args.postprocess:
-        out_mesh, _ = postprocess_mesh(
-            out_mesh,
-            sand_iterations=args.sand_iterations,
-            curvature_iterations=args.curvature_iterations,
-            finish_smooth_iterations=args.finish_smooth_iterations,
-            fill_holes_max_diameter_ratio=args.fill_holes_max_diameter_ratio,
-            fill_round_holes_enabled=args.fill_round_holes,
-            fill_round_holes_min_circularity=args.fill_round_holes_min_circularity,
-        )
     out_path = args.out or args.mesh.with_name(f"{args.mesh.stem}_extracted{args.mesh.suffix}")
-    if args.align:
-        out_mesh = _apply_align(out_mesh, args, out_path)
+    # glTF(.glb/.gltf) 스펙은 Y-up이 규약이라, 그 외 확장자(STL 등)는 대부분 뷰어/슬라이서
+    # 관례인 Z-up으로 내보낸다 -- 안 그러면 표준을 지키는 뷰어에서 옆으로 누운 것처럼 보임.
+    z_up = out_path.suffix.lower() not in (".glb", ".gltf")
 
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_mesh.export(out_path)
-    print(f"[texture-extract] 저장: {out_path} (정점 {len(out_mesh.vertices):,}개, 면 {len(out_mesh.faces):,}개)")
+    result = process_glb_to_foot(
+        args.mesh,
+        n_views=args.n_views, resolution=args.resolution,
+        vote_threshold=args.vote_threshold, close_gap_radius_mult=args.close_gap_radius,
+        postprocess=args.postprocess,
+        sand_iterations=args.sand_iterations,
+        curvature_iterations=args.curvature_iterations,
+        finish_smooth_iterations=args.finish_smooth_iterations,
+        fill_holes_max_diameter_ratio=args.fill_holes_max_diameter_ratio,
+        fill_round_holes_enabled=args.fill_round_holes,
+        fill_round_holes_min_circularity=args.fill_round_holes_min_circularity,
+        align=args.align,
+        reference_length_mm=args.reference_length_mm,
+        trim_leg=args.trim_leg,
+        z_up=z_up,
+        target_vertices=args.target_vertices,
+        floor_contact_tolerance_mm=args.floor_contact_tolerance_mm,
+    )
+    export_result(result, out_path)
     return 0
 
 
