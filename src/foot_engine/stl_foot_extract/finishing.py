@@ -395,7 +395,7 @@ def postprocess_mesh(
     curvature_mu: float = DEFAULT_CURVATURE_MU,
     finish_smooth: bool = True,
     finish_smooth_lambda: float = 0.5,
-    finish_smooth_iterations: int = 40,
+    finish_smooth_iterations: int = 10,
 ) -> tuple[trimesh.Trimesh, PostprocessStats]:
     """배경 파편 정리 + 스무딩 단계 전부를 엮는다.
 

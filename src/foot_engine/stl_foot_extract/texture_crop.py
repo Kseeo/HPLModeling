@@ -219,14 +219,20 @@ def extract_by_skin_vote(
     n_views: int = 16,
     resolution: tuple[int, int] = (640, 480),
     vote_threshold: float = 0.5,
-    close_gap_radius_mult: float = 12.0,
+    close_gap_radius_mult: float = 25.0,
     spatial_cluster_radius_mult: float = 10.0,
 ) -> TextureCropResult:
     """`multiview_skin_vote()` + 빈틈 닫힘 + 공간 클러스터링 + UV 이음매 용접까지 엮은 진입점.
 
     Args:
         vote_threshold: 관측된 뷰 중 이 비율 이상 피부로 보인 정점만 채택.
-        close_gap_radius_mult: 빈틈 닫힘(`_close_gaps()`) 반경. `0`이면 끈다.
+        close_gap_radius_mult: 빈틈 닫힘(`_close_gaps()`) 반경. `0`이면 끈다. 기본값 25는
+            실측(5샘플, 경계 루프 개수/크기 비교)으로 정함 -- 12(이전 기본값)에서는
+            발뒤꿈치/발끝처럼 카메라 각도상 관측이 드문 부위에 진짜 구멍(정점 수백 개
+            규모)이 남는 경우가 있었고, 25로 올리면 대부분 사라짐(228: 구멍 4개 -> 1개,
+            그 1개도 다리 위쪽 관측 경계라 정상). 다만 모든 샘플에서 완전히 닫히는 건
+            아님(229/232는 작은 잔여 구멍이 남음) -- 그 정도는 반경을 더 키워도 안
+            없어져서, 카메라가 그 각도에서 아예 못 본(진짜 미관측) 부위일 가능성이 높음.
         spatial_cluster_radius_mult: 공간 클러스터링 반경(전형적 정점 간격의 배수).
     """
     frac, seen = multiview_skin_vote(mesh, n_views=n_views, resolution=resolution)
