@@ -14,12 +14,10 @@ from scipy.spatial import cKDTree
 def _remove_vertices(mesh: trimesh.Trimesh, keep_mask: np.ndarray) -> trimesh.Trimesh:
     """정점 부분집합만 남기고 나머지를 안전하게 잘라낸다.
 
-    `Trimesh.update_vertices(keep_mask)`를 정점 마스크만으로 직접 부르면 안
-    된다 -- 그 구현은 제거된 정점을 가리키던 face 인덱스를 지우는 게 아니라
-    인덱스 0(inverse 배열 기본값)으로 재매핑해버려서, 살아남은 정점과 정점
-    0을 잇는 긴 가짜 면(스파이크)이 생긴다(실측 확인: 처리 후 최대 edge
-    길이가 median의 100배 이상으로 치솟음). 먼저 `update_faces()`로 제거될
-    정점을 참조하는 face를 통째로 지우고, 그다음에야 정점을 지워야 한다.
+    - Trimesh.update_vertices(keep_mask)를 직접 부르면 안 됨 -- 제거된
+      정점의 face 인덱스를 0으로 재매핑해 가짜 스파이크 면이 생김(실측:
+      최대 edge 길이가 median의 100배 이상 치솟음 확인).
+    - update_faces()로 제거될 정점을 참조하는 face를 먼저 지운 뒤 정점 제거.
     """
     face_mask = keep_mask[mesh.faces].all(axis=1)
     out = mesh.copy()

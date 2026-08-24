@@ -1,17 +1,15 @@
-"""메쉬 후처리(배경/파편 제거 + 스무딩) 모듈 — 입력이 메쉬 하나뿐, 사진/카메라/
-마스크 정보가 전혀 필요 없다.
+"""메쉬 후처리(배경/파편 제거 + 스무딩) -- 입력은 메쉬 하나뿐, 사진/카메라/
+마스크 정보 불필요.
 
-`dense.py`(사진 -> 메쉬 생성)가 만든 원본 메쉬에 이어 붙여 쓰던 후처리 단계를
-그대로 옮겨왔다 — 이미 갖고 있는 STL/PLY 등 완성된 메쉬에도 독립적으로 적용할
-수 있다(`scripts/postprocess_mesh.py` 참고).
-
-흐름(`postprocess_mesh()`):
-    keep_largest_component() -- 부유 파편 제거
-    -> (선택) prune_thin_protrusions() -- 몸통에 이어붙은 뿔/스파이크 제거
-    -> (선택) fill_small_holes() -- 핀홀만 메움
-    -> (선택) sand_surface() -- 전체 표면 이차곡면 투영
-    -> (선택) smooth_high_curvature_regions() -- 고곡률 국소 스무딩(크레이터 완화)
-    -> (선택) finish_smooth_mesh() -- 라플라시안 마감 스무딩(잔여 고주파 노이즈 정리)
+- dense.py(사진->메쉬 생성) 출력에 이어 붙이던 후처리를 옮겨온 것 -- 이미
+  가진 STL/PLY에도 독립 적용 가능(scripts/postprocess_mesh.py 참고).
+- 흐름(postprocess_mesh()):
+  keep_largest_component (부유 파편 제거)
+  -> (선택) prune_thin_protrusions (뿔/스파이크 제거)
+  -> (선택) fill_small_holes (핀홀만 메움)
+  -> (선택) sand_surface (전체 표면 이차곡면 투영)
+  -> (선택) smooth_high_curvature_regions (고곡률 국소 스무딩, 크레이터 완화)
+  -> (선택) finish_smooth_mesh (라플라시안 마감 스무딩)
 """
 
 from __future__ import annotations
@@ -25,11 +23,11 @@ import trimesh
 from scipy.sparse.csgraph import dijkstra
 from scipy.spatial import cKDTree
 
-#: `smooth_high_curvature_regions()` 기본 강도(곡률 백분위 임계값).
+#: smooth_high_curvature_regions() 기본 강도(곡률 백분위 임계값).
 DEFAULT_CURVATURE_PERCENTILE = 60.0
 DEFAULT_CURVATURE_MIN_RADIUS_MULT = 2.0
 DEFAULT_CURVATURE_MAX_RADIUS_MULT = 25.0
-#: Taubin(λ|μ) 반복 횟수 -- 근거는 `smooth_high_curvature_regions()` docstring 참고.
+#: Taubin(λ|μ) 반복 횟수.
 DEFAULT_CURVATURE_ITERATIONS = 150
 DEFAULT_CURVATURE_ALPHA = 0.7
 DEFAULT_CURVATURE_MU = -0.75
@@ -38,14 +36,10 @@ DEFAULT_CURVATURE_MU = -0.75
 def keep_largest_component(mesh: trimesh.Trimesh) -> tuple[trimesh.Trimesh, int, int]:
     """면(face) 기준 가장 큰 연결 요소만 남기고 부유 파편을 지운다.
 
-    `ReconstructMesh` 출력은 보통 발 하나가 98%+를 차지하는 단일 덩어리이고,
-    나머지는 배경에서 떨어져 나온 작은 파편이다. 이미 공간적으로 분리된
-    덩어리 단위로만 자르므로 DBSCAN(성긴 진짜 부위를 노이즈로 오판)과 달리
-    안전하다 -- 다만 발 표면에 이어져(fused) 붙은 경계 노이즈는 같은
-    덩어리라 이걸로 안 떨어진다.
-
-    Returns:
-        (필터링된 메쉬, 원본 face 수, 남은 face 수).
+    - 공간적으로 분리된 덩어리 단위로만 잘라 DBSCAN보다 안전(성긴 진짜
+      부위를 노이즈로 오판하지 않음). 단, 발 표면에 이어 붙은 경계
+      노이즈는 같은 덩어리라 안 떨어짐.
+    - Returns: (필터링된 메쉬, 원본 face 수, 남은 face 수).
     """
     total_faces = len(mesh.faces)
     components = mesh.split(only_watertight=False)
@@ -63,12 +57,11 @@ def _protrusion_remove_mask(
     density_ratio: float,
     adjacency_edges: np.ndarray | None = None,
 ) -> np.ndarray:
-    """뿔/스파이크에 해당하는 점(정점) 인덱스 마스크를 계산한다 -- 메쉬 정점과
-    raw 포인트클라우드 양쪽에서 재사용하는 공통 로직.
+    """뿔/스파이크에 해당하는 점 인덱스 마스크 계산 -- 메쉬 정점/raw
+    포인트클라우드 공용 로직.
 
-    `adjacency_edges`를 주면(메쉬) 그 인접성을 그대로 쓰고, `None`이면(raw
-    포인트클라우드, 메쉬 엣지가 없음) "얇음" 후보 점들끼리 반경 기반으로
-    인접 그래프를 새로 구성한다.
+    adjacency_edges를 주면(메쉬) 그 인접성을 쓰고, None이면(raw 포인트클라우드)
+    "얇음" 후보 점들끼리 반경 기반으로 인접 그래프를 새로 만든다.
     """
     n = len(points)
     if n < 20:
@@ -119,17 +112,12 @@ def prune_thin_protrusions(
 ) -> tuple[trimesh.Trimesh, int]:
     """몸통에 이어져(fused) 붙은 뿔/스파이크를 통째로 잘라낸다.
 
-    `keep_largest_component()`는 이미 분리된 파편만 잡는다 -- 뿔은 몸통과
-    같은 연결 요소라 무력하다. 대신 "뿔은 국소 정점 밀도가 몸통보다
-    뚜렷이 낮다"는 걸 핵심 단서로 쓴다 -- 얇고 길쭉한 구조라 단위
-    부피당 정점 수가 적다.
-
-    한계: 메쉬 위상을 망가뜨릴 수 있어 `dense.py`의 주 파이프라인은 점 단위
-    사전 제거(`clean_dense_point_cloud`의 `prune_protrusions`)를 대신 쓴다.
-    여기 남겨둔 건 이미 완성된 메쉬에 사후 적용하고 싶을 때를 위해서다.
-
-    Returns:
-        (프루닝된 메쉬, 제거된 정점 수).
+    - keep_largest_component()는 분리된 파편만 잡음(뿔은 같은 연결 요소라
+      무력) -- "뿔은 국소 정점 밀도가 몸통보다 낮다"는 걸 단서로 씀.
+    - 한계: 메쉬 위상을 망가뜨릴 수 있어 dense.py 주 파이프라인은 점 단위
+      사전 제거(clean_dense_point_cloud의 prune_protrusions)를 대신 씀.
+      여기 남긴 건 완성 메쉬 사후 적용용.
+    - Returns: (프루닝된 메쉬, 제거된 정점 수).
     """
     remove_mask = _protrusion_remove_mask(
         mesh.vertices, adjacency_edges=mesh.edges_unique,
@@ -153,17 +141,14 @@ def fill_small_holes(
 ) -> tuple[trimesh.Trimesh, int]:
     """작은 구멍(핀홀/관측 누락 조각)만 팬 삼각분할로 메운다.
 
-    발바닥처럼 원래 안 찍은 큰 구멍은 일부러 그대로 둔다 -- 억지로 메우면
-    평평한 가짜 뚜껑이 씌워져 실제 형태를 왜곡한다. 구멍 하나의 바운딩박스
-    대각선이 메쉬 전체 대각선의 `max_hole_diameter_ratio`보다 작을 때만 메운다.
-
-    삼각형은 추가만 되고(폴리곤 감소 없음) 기존 정점/면은 그대로 둔다.
-    `trimesh.repair.fill_holes()`와 같은 방식(경계 사이클 탐색 + 팬
-    삼각분할)이지만 크기 필터가 없는 그 함수와 달리 큰 구멍은 건너뛴다.
+    - 발바닥처럼 원래 안 찍은 큰 구멍은 그대로 둠(억지로 메우면 가짜
+      뚜껑이 씌워져 형태 왜곡). 구멍 바운딩박스 대각선이 메쉬 전체 대각선의
+      max_hole_diameter_ratio보다 작을 때만 메움.
+    - trimesh.repair.fill_holes()와 같은 방식(경계 사이클+팬 삼각분할)이나
+      크기 필터가 추가된 버전. 삼각형 추가만, 기존 정점/면은 그대로.
 
     Args:
-        max_hole_diameter_ratio: 구멍 자체 바운딩박스 대각선 / 메쉬 전체
-            바운딩박스 대각선 비율 상한(기본 0.05 = 5%).
+        max_hole_diameter_ratio: 구멍 대각선/메쉬 전체 대각선 비율 상한(기본 5%).
         use_fan: 볼록하지 않은 구멍도 팬 삼각분할로 메울지.
 
     Returns:
@@ -196,8 +181,7 @@ def fill_small_holes(
     if len(new_faces) == 0:
         return mesh, 0
 
-    # trimesh.repair.fill_holes()와 같은 winding 보정 -- 새 face의 경계
-    # edge가 기존 경계와 같은 방향이면 뒤집는다(반대 방향이어야 정상).
+    # winding 보정 -- 새 face 경계 edge가 기존 경계와 같은 방향이면 뒤집는다.
     new_edges = trimesh.geometry.faces_to_edges(new_faces)
     hashable_new = trimesh.grouping.hashable_rows(new_edges)
     hashable_old = trimesh.grouping.hashable_rows(boundary)
@@ -214,14 +198,11 @@ def _ring_neighbors_padded(
 ) -> tuple[np.ndarray, np.ndarray]:
     """위상 인접(1-ring)을 BFS로 확장해 정점별 이웃 최소 개수를 채운다.
 
-    공간(유클리드) 최근접이 아니라 메쉬 표면을 따라간 위상 인접을 쓴다 --
-    발처럼 접힌/오목한 형태에서는 공간적으로 가까워도 표면상으로는 먼 두
-    지점(예: 발목 반대쪽, 발가락 사이)이 유클리드 최근접 이웃으로 섞여
-    들어가 국소 곡면 피팅을 망가뜨린다.
-
-    Returns:
-        (idx_padded, mask) -- 둘 다 (n, max_neighbors) 모양. `mask`가
-        False인 자리의 `idx_padded` 값은 의미 없다(0으로 채워짐).
+    - 공간(유클리드) 최근접이 아니라 표면을 따라간 위상 인접을 씀 -- 접힌/
+      오목한 형태(발목 반대쪽, 발가락 사이 등)에서 유클리드 최근접은 국소
+      곡면 피팅을 망가뜨림.
+    - Returns: (idx_padded, mask) 둘 다 (n, max_neighbors). mask=False인
+      자리의 idx_padded 값은 무의미(0으로 채워짐).
     """
     n = len(adjacency)
     idx_padded = np.zeros((n, max_neighbors), dtype=np.int64)
@@ -252,44 +233,27 @@ def sand_surface(
 ) -> trimesh.Trimesh:
     """모든 정점을 국소 이차곡면(quadric) 근사에 투영해 다듬는다("사포질").
 
-    각 정점 주변 위상(표면) 인접을 BFS로 확장해 최소 `min_neighbors`개를
-    모은 뒤, 그 이웃들로 국소 접평면(PCA)을 구하고 접평면 좌표계에서 2차
-    곡면 `h = a*u^2+b*uv+c*v^2+d*u+e*v+f`를 최소제곱으로 피팅해, 그 정점를
-    이웃들의 추세가 예측하는 위치(`f`, 법선 방향 오프셋)로 옮긴다. 이웃
-    평균으로 등방적으로 당기는 라플라시안(`smooth_high_curvature_regions()`)과
-    달리 법선 방향으로만 움직이므로 접평면 방향의 진짜 형태(2차 항으로
-    표현되는 국소 굴곡)는 보존하면서 그 정점만 튀는 고주파 노이즈를 깎아낸다.
-
-    `smooth_high_curvature_regions()`와 달리 곡률 임계값으로 일부만 고르지
-    않고 전체 정점에 균일하게 적용한다 -- 발 전체를 다듬는 일반 노이즈
-    완화용이며, 정점/면 개수·위상은 그대로다(폴리곤 감소 없음).
-
-    구현 노트:
-    - 이웃은 공간(유클리드) 최근접이 아니라 위상(표면) 인접이다 --
-      `_ring_neighbors_padded()` docstring 참고.
-    - 이웃 좌표(u, w)는 피팅 전에 국소 이웃 거리 스케일로 정규화한다 --
-      정규화 없이는 좌표 스케일에 따라 정규방정식(AᵀA) 조건수가 나빠져
-      일부 정점의 피팅이 극단값으로 튄다. 남는 이상치에 대비해
-      `max_offset_ratio`로 오프셋을 국소 스케일의 배수로 clamp한다.
-
-    한계: 관측 부족으로 생긴 오목 부위(아치/뒤꿈치) 크레이터처럼 이웃
-    전체가 같은 방향으로 치우친 저주파 왜곡은 이웃들의 이차곡면 추세
-    자체가 이미 왜곡돼 있어 이 방식으로도 못 없앤다 -- 크레이터 완화는
-    여전히 `smooth_high_curvature_regions()` 몫이고, 이 함수는 그것과
-    별개로 전반적인 표면 노이즈를 줄이는 보완 단계다.
+    - 정점 주변 위상 인접을 min_neighbors개 모아 국소 접평면(PCA) 구한 뒤
+      h = a*u²+b*uv+c*v²+d*u+e*v+f 를 최소제곱 피팅, 예측 위치(f, 법선
+      오프셋)로 이동. 이웃 평균으로 등방적으로 당기는 라플라시안과 달리
+      법선 방향으로만 움직여 접평면 방향의 진짜 형태(2차 항)는 보존.
+    - smooth_high_curvature_regions()와 달리 곡률 임계값 없이 전체 정점에
+      균일 적용 -- 일반 노이즈 완화용. 정점/면 개수·위상은 그대로.
+    - 이웃 좌표(u,w)는 국소 거리 스케일로 정규화(안 하면 정규방정식 조건수
+      악화로 일부 정점 피팅이 극단값으로 튐). max_offset_ratio로 오프셋을
+      국소 스케일 배수로 clamp.
+    - 한계: 관측 부족 크레이터처럼 이웃 전체가 같은 방향으로 치우친 저주파
+      왜곡은 이웃의 이차곡면 추세 자체가 왜곡돼 있어 못 없앰 --
+      smooth_high_curvature_regions() 몫.
 
     Args:
-        min_neighbors: 국소 곡면 피팅에 쓸 최소 이웃 수 -- 이차곡면
-            미지수(6개)보다 충분히 많아야 안정적이다. 1-ring으로 부족하면
-            2-ring, 3-ring... 순으로 확장한다.
-        max_neighbors: 이웃이 이보다 많아지면 자른다(배열 패딩 크기 상한).
-        iterations: 반복 횟수. 이웃 집합(위상 기준이라 메쉬가 안 변하는 한
-            고정)은 한 번만 계산하고, 매 반복 그 이웃들의 현재 위치로
-            다시 피팅한다.
-        regularization: 정규방정식(AᵀA, 정규화된 u/w 기준이라 대각 성분이
-            대략 O(min_neighbors) 스케일)에 더하는 상대적 대각 성분.
-        max_offset_ratio: 오프셋 크기를 국소 이웃 평균 거리의 이 배수로
-            제한하는 안전장치(기본 1.0).
+        min_neighbors: 국소 곡면 피팅 최소 이웃 수(이차곡면 미지수 6개보다
+            충분히 많아야 함). 1-ring 부족 시 2-ring, 3-ring...으로 확장.
+        max_neighbors: 이웃 상한(배열 패딩 크기).
+        iterations: 반복 횟수. 이웃 집합은 한 번만 계산(위상 기준, 메쉬
+            불변), 매 반복 현재 위치로 재피팅.
+        regularization: 정규방정식(AᵀA)에 더하는 상대적 대각 성분.
+        max_offset_ratio: 오프셋을 국소 이웃 평균 거리의 이 배수로 제한.
     """
     n = len(mesh.vertices)
     if n < max(min_neighbors, 6) + 1:
@@ -313,7 +277,7 @@ def sand_surface(
         scale = np.where(valid, dist.sum(axis=1) / np.maximum(mask.sum(axis=1), 1), 1.0)
         scale = np.maximum(scale, 1e-9)
 
-        # u/w를 국소 스케일로 정규화 -- 상수항(f)은 (u,w)=(0,0)에서의 값이라
+        # u/w를 국소 스케일로 정규화 -- 상수항(f)은 (u,w)=(0,0) 값이라
         # 스케일 무관, 그대로 실제 법선 방향 오프셋(길이 단위)이다.
         u = (np.einsum("nki,ni->nk", rel, u_axis) / scale[:, None]) * maskf
         w = (np.einsum("nki,ni->nk", rel, v_axis) / scale[:, None]) * maskf
@@ -348,30 +312,22 @@ def smooth_high_curvature_regions(
 ) -> trimesh.Trimesh:
     """곡률이 튀는 영역을 Taubin(λ|μ) 스무딩한다. 나머지 정점은 그대로 둔다.
 
-    관측 부족으로 생긴 크레이터형 결함 완화용 -- 노이즈와 진짜 굴곡을
-    구분하지 못해 발가락 사이 같은 진짜 디테일도 함께 뭉갠다.
-
-    확산 반경을 전체에 고정 ring 수로 주지 않고, **코어 영역(연결된 고곡률
-    정점 덩어리) 하나하나마다 그 영역의 곡률 반경(1/|곡률|)에 비례해서**
-    다르게 준다(curvature-adaptive smoothing -- bilateral mesh denoising와
-    같은 원리: 완만하고 넓은 결함은 넓게, 좁고 조밀한 디테일은 좁게). 뒤꿈치처럼
-    완만한 큰 크레이터는 곡률 반경이 커서 넓게 퍼지고, 발가락 사이처럼
-    급격한 작은 굴곡은 반경이 작아 좁게만 퍼진다. 반경은 위상 그래프의
-    실거리(다익스트라)로 잰다 -- 홉 수 기준이면 삼각형 크기가 들쭉날쭉할 때
-    영역마다 실제 퍼지는 거리가 달라진다.
-
-    평범한(가중치 없는) 라플라시안 한 방향으로만 반복하면 이웃 평균 쪽으로
-    계속 당기기만 해서 체적이 체계적으로 줄어드는 편향이 생긴다. `alpha`(양의
-    라플라시안 스텝)와 `mu`(반대 방향 스텝, `|mu| > alpha`)를 번갈아 적용하는
-    Taubin 스무딩으로 그 수축을 상쇄한다.
+    - 관측 부족 크레이터형 결함 완화용 -- 노이즈와 진짜 굴곡을 구분 못 해
+      발가락 사이 등 진짜 디테일도 함께 뭉갬(트레이드오프 감수).
+    - 확산 반경은 전체 고정이 아니라 코어 영역(연결된 고곡률 정점 덩어리)
+      별로 그 영역 곡률 반경(1/|곡률|)에 비례해 부여(curvature-adaptive,
+      bilateral mesh denoising과 같은 원리) -- 완만하고 넓은 결함은 넓게,
+      좁고 조밀한 디테일은 좁게. 반경은 위상 그래프 다익스트라 실거리로 잼.
+    - 평범한 라플라시안 단방향 반복은 체적이 체계적으로 줄어드는 편향이
+      있어, alpha(양의 스텝)/mu(반대 방향 스텝, |mu|>alpha) 번갈아 적용하는
+      Taubin 스무딩으로 상쇄.
 
     Args:
         curvature_percentile: 이 백분위 이상 |곡률|인 정점을 코어로 삼는다.
-        min_radius_edge_mult/max_radius_edge_mult: 영역별 확산 반경을
-            전형적 엣지 길이의 이 배수 범위로 clip한다 -- 거의 평평해
-            곡률이 0에 가까운 영역이 반경 폭주(1/0)하는 것을 막는 안전장치.
+        min_radius_edge_mult/max_radius_edge_mult: 영역별 확산 반경을 전형적
+            엣지 길이의 이 배수 범위로 clip(평평한 영역의 반경 폭주 방지).
         alpha: 라플라시안(수축) 스텝 크기.
-        mu: 역방향(팽창) 스텝 크기(음수, 절댓값이 alpha보다 커야 함).
+        mu: 역방향(팽창) 스텝 크기(음수, |mu| > alpha).
     """
     v = mesh.vertices.copy()
     n = len(v)
@@ -422,9 +378,8 @@ def smooth_high_curvature_regions(
             weight[reached] = np.maximum(weight[reached], w)
         weight[core_mask] = 1.0
 
-    # 행별로 정규화한(각 행 합=1) 인접 행렬 -- 이웃 평균을 희소행렬 곱 한 번으로
-    # 계산한다(파이썬 for문 대비 반복이 많을 때 훨씬 빠름). 이웃 없는 정점은
-    # 자기 자신에 1을 둬 평균이 제자리가 되게 한다.
+    # 행별 정규화(각 행 합=1) 인접 행렬로 이웃 평균을 희소행렬 곱 한 번에
+    # 계산(파이썬 for문보다 빠름). 이웃 없는 정점은 자기 자신에 1을 둠.
     rows = np.concatenate([np.full(len(neighbors[i]), i) for i in range(n)])
     cols = np.concatenate([np.asarray(neighbors[i], dtype=np.int64) for i in range(n)])
     deg = np.array([len(neighbors[i]) for i in range(n)])
@@ -459,28 +414,19 @@ def finish_smooth_mesh(
     lamb: float = 0.5,
     iterations: int = 40,
 ) -> trimesh.Trimesh:
-    """전체 정점에 평범한(가중치 없는) 라플라시안 스무딩을 넉넉히 반복해 남은
-    고주파 표면 노이즈를 마감 처리한다.
+    """전체 정점에 평범한(가중치 없는) 라플라시안 스무딩을 반복해 남은 고주파
+    표면 노이즈를 마감 처리한다.
 
-    `smooth_high_curvature_regions()`(Taubin λ|μ)는 체적 수축 방지에 초점을
-    맞춘 보수적인 방식이라, 발등/발목 표면에 남는 자잘한 요철(사진 노이즈
-    수준의 고주파 성분)에는 상대적으로 약했다(실측 확인: 렌더로 보면 여전히
-    까끌까끌함). 대신 방향 상쇄 없이 매 반복 이웃 평균으로 그대로 당기는
-    평범한 라플라시안을 여러 번 돌리면 이런 고주파 노이즈가 확실히 빠진다 --
-    다만 반복이 많아지면 진짜 굴곡(발가락 사이 등)도 같이 뭉개지고 부피가
-    줄어드는 편향이 있으므로, 이미 다른 단계에서 형태를 다듬은 마지막
-    마감 단계로만 쓴다.
-
-    `trimesh.smoothing.filter_laplacian()`의 기본 `volume_constraint=True`는
-    반복마다 `mesh.volume` 비율로 정점을 재스케일해 부피 수축을 상쇄하는데,
-    이 프로젝트 메쉬는 발바닥 쪽이 원래 안 찍혀 항상 non-watertight라
-    `mesh.volume`(발산정리 기반) 자체가 이런 열린 메쉬에서 정의가 불안정하다
-    -- 실측으로 이 비율이 음수가 나와 `(...)**(1/3)`이 NaN을 내고 정점 전체가
-    NaN으로 오염돼 파이프라인이 죽는 경우를 확인했다. 그래서 `volume_constraint=False`로
-    끄고 쓴다 -- 어차피 non-watertight 메쉬에는 그 보정 자체가 의미가 없다.
-
-    정점 96,879개 기준 40회 반복에 약 3.8초 -- 파이프라인 전체(SfM 수분,
-    dense MVS 수분) 대비 무시할 수준.
+    - smooth_high_curvature_regions()(Taubin λ|μ)는 체적 수축 방지에 초점을
+      둔 보수적 방식이라 자잘한 고주파 요철에는 약함 -- 방향 상쇄 없는
+      평범한 라플라시안 반복으로 확실히 제거. 반복이 많으면 진짜 굴곡도
+      뭉개지고 부피가 줄어드는 트레이드오프가 있어 마지막 마감 단계로만 사용.
+    - trimesh.smoothing.filter_laplacian() 기본 volume_constraint=True는
+      mesh.volume 비율로 정점을 재스케일해 부피 수축을 상쇄하는데, 이
+      프로젝트 메쉬는 발바닥이 안 찍혀 항상 non-watertight라 mesh.volume이
+      불안정(음수 -> (...)**(1/3) NaN -> 정점 전체 오염 확인됨) -- 그래서
+      volume_constraint=False로 끄고 씀.
+    - 정점 96,879개 기준 40회 반복 약 3.8초 -- 파이프라인 전체 대비 무시할 수준.
 
     Args:
         lamb: 반복당 이웃 평균 쪽으로 당기는 비율(0~1).
@@ -497,7 +443,7 @@ def finish_smooth_mesh(
 
 @dataclass(slots=True)
 class PostprocessStats:
-    """`postprocess_mesh()`가 남기는 단계별 요약."""
+    """postprocess_mesh()가 남기는 단계별 요약."""
 
     faces_before: int = 0
     faces_after_largest_component: int = 0
@@ -531,27 +477,22 @@ def postprocess_mesh(
     finish_smooth_lambda: float = 0.5,
     finish_smooth_iterations: int = 10,
 ) -> tuple[trimesh.Trimesh, PostprocessStats]:
-    """배경/파편 제거 + 스무딩 단계 전부를 엮는다 -- `dense.run_dense_pipeline()`의
-    메쉬 생성 이후 부분과 동일한 순서이며, 사진/카메라 정보 없이 메쉬 하나만
-    입력받는다. 이미 완성된 STL 등에 그대로 적용 가능(`scripts/postprocess_mesh.py`).
+    """배경/파편 제거 + 스무딩 단계 전부를 엮는다.
+
+    - dense.run_dense_pipeline()의 메쉬 생성 이후 부분과 동일 순서, 메쉬
+      하나만 입력받아 완성 STL 등에도 그대로 적용 가능(scripts/postprocess_mesh.py).
 
     Args:
         keep_largest(True): 가장 큰 연결 요소만 남기고 부유 파편 제거.
-        prune_protrusions(False): 몸통에 이어붙은 뿔/스파이크 사후 제거 --
-            메쉬 위상을 망가뜨릴 수 있어 검증 전, 기본 꺼짐.
-        fill_holes(True): 작은 구멍(핀홀)만 메움 -- 큰 구멍(발바닥 등)은 그대로.
+        prune_protrusions(False): 뿔/스파이크 사후 제거 -- 위상 손상 우려로 기본 꺼짐.
+        fill_holes(True): 작은 구멍(핀홀)만 메움, 큰 구멍(발바닥 등)은 유지.
         sand_surface_enabled(True): 전체 정점 이차곡면 투영 노이즈 완화.
         smooth_high_curvature(True): 고곡률 영역 국소 Taubin 스무딩.
-        finish_smooth(True): `finish_smooth_mesh()`로 평범한 라플라시안
-            마감 스무딩 -- 위 두 단계로 안 빠지는 고주파 표면 노이즈 정리.
-            가장 마지막에 적용된다. 비용 미미(정점 10만개 기준 수 초).
-            `finish_smooth_iterations` 기본값 10은 실측 근거 있음 -- 이 단계는
-            아직 축약(decimate) 전 고밀도(3~5만 정점) 메쉬에 적용되는데, 뒤이어
-            `dense.decimate_mesh()`가 축약+자체 마감 스무딩을 한 번 더 하기
-            때문에, 여기서 40회를 돌리든 5회를 돌리든 최종(18k 축약 후) 결과
-            길이 변화가 ±0.8%p 안에서 반복 횟수와 무관하게(단조 증가/감소도
-            아님) 흔들림 -- 이 단계 자체가 최종 결과에 거의 영향을 못 준다는
-            뜻이라, 계산량만 줄이도록 40 -> 10으로 낮춤.
+        finish_smooth(True): 라플라시안 마감 스무딩(가장 마지막 적용, 비용
+            미미). finish_smooth_iterations 기본값 10은 실측 근거 -- 이 뒤
+            dense.decimate_mesh()가 축약+마감 스무딩을 한 번 더 하므로,
+            여기서 반복 횟수를 바꿔도 최종 결과 길이 변화가 ±0.8%p 안에서
+            흔들려(단조 관계 아님) 영향이 미미함 -- 계산량만 줄이도록 40->10.
 
     Returns:
         (후처리된 메쉬, 단계별 통계).

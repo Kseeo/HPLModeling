@@ -118,14 +118,11 @@ def fill_round_holes(
 ) -> tuple[trimesh.Trimesh, int]:
     """둥근 구멍(단순 미관측 결손으로 추정)만 크기와 무관하게 메운다.
 
-    `fill_small_holes()`는 크기 하나로만 판단해 발목 절단면처럼 원래 열려
-    있어야 할 큰 구멍과 큰 미관측 구멍을 구분 못 한다. 실측 확인(project_228):
-    절단면은 원형도 0.39, 단순 결손 구멍은 0.92로 뚜렷이 갈렸다 -- 다만
-    project_229처럼 애매한 케이스(원형도 0.29, 눈으로는 메워도 됐어 보였지만
-    절단면과 비슷하게 낮음)도 있어 `min_circularity` 기본값을 보수적으로
-    0.7로 잡았다. 그래도 애매하면 안 메워지니 `fill_small_holes()`처럼
-    `max_hole_diameter_ratio`(기본 0.6, 매우 큰 안전판)와 함께 쓸 것 --
-    사람이 결과를 보고 필요하면 낮춰서 수동으로 더 메울 수 있다.
+    - fill_small_holes()는 크기만 보므로 발목 절단면처럼 원래 열려있어야
+      할 큰 구멍과 큰 미관측 구멍을 구분 못 함.
+    - 실측(project_228): 절단면 원형도 0.39, 단순 결손 구멍 0.92로 구분됨 --
+      애매한 케이스도 있어 min_circularity 기본값 보수적으로 0.7.
+    - max_hole_diameter_ratio(기본 0.6)를 안전판으로 병행 사용할 것.
     """
     if len(mesh.faces) < 3 or mesh.is_watertight:
         return mesh, 0
