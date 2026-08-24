@@ -958,6 +958,7 @@ def run_dense_pipeline(
     finish_smooth_lambda: float = 0.5,
     finish_smooth_iterations: int = 40,
     prune_protrusions: bool = False,
+    target_vertices: int | None = None,
     keep_intermediates: bool = False,
 ) -> Path:
     """위 단계 전부를 엮는 오케스트레이션. 최종 메쉬 경로를 반환한다.
@@ -965,6 +966,11 @@ def run_dense_pipeline(
     - sparse_dir(필수): sparse 재구성 폴더(largest_sparse_dir() 참고).
     - masks_dir(필수): masking.generate_masks(..., dilate=0) 결과.
     - refine(False): RefineMesh(느림) 실행 여부.
+    - target_vertices(None): 지정하면 스무딩 전에 decimate_mesh()로 먼저
+      축약한다. smooth_high_curvature_regions()가 쓰는
+      trimesh.curvature.discrete_mean_curvature_measure()가 정점 수에
+      선형보다 훨씬 가파르게 느려져(145k개서 224초, 20k개서 4.9초) 스무딩을
+      저해상도에서 먼저 하는 쪽이 압도적으로 빠르다.
     - densify_resolution_level/densify_number_views_fuse(None): 그대로 전달.
     - visibility_filter_threshold(None): 음수면 가시성 필터 활성화.
     - grazing_filter_min_score(None): grazing 필터, visibility보다 먼저 적용.
@@ -1040,6 +1046,11 @@ def run_dense_pipeline(
     # 안 씀 -- clean_dense_point_cloud의 prune_protrusions(기본 꺼짐)를 대신
     # 사용. 배경/파편 제거+스무딩은 mesh_postprocess.postprocess_mesh()로 위임.
     mesh = trimesh.load(mesh_ply, process=False)
+    if target_vertices is not None:
+        # 스무딩(특히 discrete_mean_curvature_measure)이 정점 수에 훨씬
+        # 가파르게 느려지므로 먼저 축약 -- 마감 스무딩은 postprocess_mesh가
+        # 이어서 하니 여기선 끔.
+        mesh = decimate_mesh(mesh, target_vertices=target_vertices, smooth_after=False)
     mesh, post_stats = postprocess_mesh(
         mesh, keep_largest=True, prune_protrusions=False,
         fill_holes=fill_holes,

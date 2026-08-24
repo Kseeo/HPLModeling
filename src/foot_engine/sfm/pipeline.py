@@ -100,6 +100,7 @@ def run_pipeline(
     finish_smooth_lambda: float = 0.5,
     finish_smooth_iterations: int = 40,
     prune_protrusions: bool = False,
+    target_vertices: int | None = None,
     trim_leg: bool = False,
     keep_intermediates: bool = False,
 ) -> PipelineResult:
@@ -134,8 +135,9 @@ def run_pipeline(
         curvature_min_radius_mult/curvature_max_radius_mult/curvature_iterations/
         curvature_alpha/curvature_mu/fill_holes/
         sand_surface_enabled/finish_smooth/finish_smooth_lambda/
-        finish_smooth_iterations/prune_protrusions: `dense.run_dense_pipeline()`으로
-            그대로 전달(각 인자 설명은 그쪽 docstring 참고).
+        finish_smooth_iterations/prune_protrusions/target_vertices: `dense.run_dense_pipeline()`으로
+            그대로 전달(각 인자 설명은 그쪽 docstring 참고) -- target_vertices를 주면
+            스무딩 전에 미리 축약해 고곡률 스무딩이 훨씬 빨라진다.
         trim_leg(False): `dense.finalize_mesh()`로 그대로 전달 -- 다리 포함
             케이스 자동 트림, 그쪽 docstring 참고.
         keep_intermediates(False): 성공 후 중간 산출물 정리 여부. `True`면
@@ -263,6 +265,7 @@ def run_pipeline(
         finish_smooth=finish_smooth, finish_smooth_lambda=finish_smooth_lambda,
         finish_smooth_iterations=finish_smooth_iterations,
         prune_protrusions=prune_protrusions,
+        target_vertices=target_vertices,
         keep_intermediates=keep_intermediates,
     )
 
