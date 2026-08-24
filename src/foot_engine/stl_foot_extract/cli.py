@@ -77,7 +77,10 @@ def _add_common_postprocess_args(parser: argparse.ArgumentParser) -> None:
                          help="배경 파편 정리 + 스무딩(finishing.postprocess_mesh)을 끈다. 기본 켜짐.")
     parser.add_argument("--sand-iterations", type=int, default=3, help="사포질 반복 횟수(기본 3).")
     parser.add_argument("--curvature-iterations", type=int, default=150, help="고곡률 스무딩 반복 횟수(기본 150).")
-    parser.add_argument("--finish-smooth-iterations", type=int, default=40, help="마감 라플라시안 반복 횟수(기본 40).")
+    parser.add_argument("--finish-smooth-iterations", type=int, default=10,
+                         help="마감 라플라시안 반복 횟수(기본 10) -- 축약(decimate) 전 단계라 이 값을 "
+                              "바꿔도 최종(18k 축약 후) 결과엔 실측상 거의 영향 없음(±0.8%%p, 반복 "
+                              "횟수와 단조 관계도 아님), 계산량만 아끼는 값.")
     parser.add_argument("--fill-holes-max-diameter-ratio", type=float, default=0.05,
                          help="이 비율(메쉬 전체 대각선 대비) 이하인 구멍만 메움(기본 0.05). "
                               "발목 절단면처럼 원래 열려있어야 하는 큰 구멍까지 메우지 않도록 낮게 유지할 것.")
@@ -292,8 +295,9 @@ def main(argv: list[str] | None = None) -> int:
     p_tex.add_argument("--resolution", type=int, default=640, help="렌더 가로 해상도(기본 640, 세로는 0.75배)")
     p_tex.add_argument("--vote-threshold", type=float, default=0.5,
                         help="관측된 뷰 중 이 비율 이상 피부로 보여야 채택(기본 0.5)")
-    p_tex.add_argument("--close-gap-radius", type=float, default=12.0,
-                        help="빈틈 닫힘(팽창-침식) 반경, 전형적 정점 간격의 배수(기본 12, 0=끔)")
+    p_tex.add_argument("--close-gap-radius", type=float, default=25.0,
+                        help="빈틈 닫힘(팽창-침식) 반경, 전형적 정점 간격의 배수(기본 25, 0=끔) -- "
+                             "12였을 때 발뒤꿈치/발끝에 진짜 구멍이 남는 경우가 실측으로 확인돼 올림")
     _add_common_postprocess_args(p_tex)
     _add_common_align_args(p_tex)
     p_tex.set_defaults(func=cmd_texture_extract)

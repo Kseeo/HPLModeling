@@ -1,16 +1,13 @@
 """색/텍스처가 있는 메쉬(GLB 등)에서 다중 가상 시점 렌더 + 피부 분할 투표로
 발을 자동으로 크롭한다.
 
-`crop.py`/`branch_cut.py`/`locate.py`는 색 없는 STL 전제라 이 신호를 못 쓴다
-(`sfm.masking`의 MediaPipe 피부 분할은 색에 의존). 텍스처가 있는 입력에서는
-이미 검증된 그 모델을 그대로 재사용할 수 있다 -- 가상 카메라 여러 곳에서
-렌더링해 각 정점에 "몇 번 피부로 보였는지" 투표시키는 방식(multi-view
-semantic fusion)이며, 사진/실제 카메라 포즈가 전혀 필요 없다(메쉬 하나만 입력).
-
-한계: glTF/GLB는 UV 이음매에서 정점이 복제돼 있어(같은 3D 위치, 다른 UV) 위상
-인접(topology)이 그 이음매에서 끊긴다 -- `merge_vertices(merge_tex=True)`로
-복제를 합친 뒤에야 `keep_largest_component()` 등 위상 기반 후처리가 정상
-동작한다(`_weld_uv_seams()` 참고).
+- crop.py/branch_cut.py/locate.py는 색 없는 STL 전제라 이 신호를 못 씀
+  (sfm.masking의 MediaPipe 피부 분할은 색 의존). 텍스처 입력에서는 그
+  모델을 재사용 -- 가상 카메라 여러 곳에서 렌더 후 정점별 "피부로 보인
+  횟수"를 투표(multi-view semantic fusion), 사진/카메라 포즈 불필요.
+- 한계: glTF/GLB는 UV 이음매에서 정점이 복제돼(같은 3D 위치, 다른 UV) 위상
+  인접이 끊김 -- merge_vertices(merge_tex=True)로 합쳐야 위상 기반 후처리
+  (keep_largest_component 등)가 정상 동작(_weld_uv_seams() 참고).
 """
 
 from __future__ import annotations
@@ -219,14 +216,17 @@ def extract_by_skin_vote(
     n_views: int = 16,
     resolution: tuple[int, int] = (640, 480),
     vote_threshold: float = 0.5,
-    close_gap_radius_mult: float = 12.0,
+    close_gap_radius_mult: float = 25.0,
     spatial_cluster_radius_mult: float = 10.0,
 ) -> TextureCropResult:
     """`multiview_skin_vote()` + 빈틈 닫힘 + 공간 클러스터링 + UV 이음매 용접까지 엮은 진입점.
 
     Args:
         vote_threshold: 관측된 뷰 중 이 비율 이상 피부로 보인 정점만 채택.
-        close_gap_radius_mult: 빈틈 닫힘(`_close_gaps()`) 반경. `0`이면 끈다.
+        close_gap_radius_mult: 빈틈 닫힘(_close_gaps()) 반경. 0이면 끔. 기본값
+            25는 실측 근거(12일 때 발뒤꿈치/발끝에 진짜 구멍이 남는 경우 확인,
+            25로 대부분 해소) -- 일부 샘플엔 반경을 키워도 안 없어지는 잔여
+            구멍이 남는데, 그건 카메라 각도상 진짜 미관측 부위로 판단.
         spatial_cluster_radius_mult: 공간 클러스터링 반경(전형적 정점 간격의 배수).
     """
     frac, seen = multiview_skin_vote(mesh, n_views=n_views, resolution=resolution)

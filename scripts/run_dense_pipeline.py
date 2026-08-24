@@ -24,6 +24,11 @@ dense 파라미터만 바꿔 재실행하려면(sparse SfM 재계산 없이) 1�
 
     # 3) 최종 품질까지 원하면 RefineMesh 포함 (느림, 전체 시간의 70%+ 차지)
     python scripts/run_dense_pipeline.py data/output/sfm_pipeline/test02_run --refine
+
+정렬된 최종 메쉬는 .ply(Z-up, 원래 자리에 덮어씀)와 .glb(Y-up, glTF 규약에 맞춰
+`to_y_up()`으로 되돌려 저장, `--no-glb-export`로 끌 수 있음) 둘 다 나온다 --
+`stl_foot_extract.cli texture-extract`가 glb를 저장하는 것과 동일한 결과물 형태.
+`--target-vertices`/`--floor-contact-tolerance-mm`도 그쪽과 동일하게 지원.
 """
 
 from __future__ import annotations
@@ -37,7 +42,15 @@ import trimesh
 import _cli_common  # noqa: F401  -- sys.path 설정 + 콘솔 UTF-8 고정(부작용 import)
 from _dense_cli_args import add_dense_args  # noqa: E402
 
-from foot_engine.sfm.dense import finalize_mesh, largest_sparse_dir, run_dense_pipeline  # noqa: E402
+import numpy as np  # noqa: E402
+
+from foot_engine.sfm.dense import (  # noqa: E402
+    finalize_mesh,
+    find_floor_contact_mask,
+    largest_sparse_dir,
+    run_dense_pipeline,
+    to_y_up,
+)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -64,6 +77,23 @@ def main(argv: list[str] | None = None) -> int:
         help="자기신고 발길이(mm). 있으면 최종 메쉬를 이 길이에 맞춰 스케일링한다"
              "(SfM은 절대 축척이 없음). 생략하면 250mm placeholder로 스케일링하고 경고 출력.",
     )
+    parser.add_argument(
+        "--target-vertices", type=int, default=None,
+        help="지정하면 최종 메쉬를 이 정점 수 근방까지 단순화+마감 스무딩한다 "
+             "(다른 데이터셋/모델의 메쉬 해상도에 맞출 때).",
+    )
+    parser.add_argument(
+        "--floor-contact-tolerance-mm", type=float, default=None,
+        help="지정하면 바닥(접지면)에서 이 거리(mm) 이내인 정점을 접지 노드로 표시해 "
+             "'<mesh_path stem>_floor_contact.npy'로 같이 저장한다. 기본 꺼짐.",
+    )
+    parser.add_argument(
+        "--no-glb-export", dest="glb_export", action="store_false",
+        help="정렬된 최종 메쉬를 .glb로도 같이 저장하는 걸 끈다. 기본 켜짐 -- "
+             "glTF 규약(Y-up)에 맞춰 별도로 회전해서 저장하므로(`to_y_up()`), "
+             ".ply(Z-up)와 같이 열어봐도 둘 다 정방향으로 보인다.",
+    )
+    parser.set_defaults(glb_export=True)
     parser.add_argument(
         "--cleanup-sfm-scratch", action="store_true",
         help="완료 후 run_dir 안에서 dense 단계가 이미 다 써서 더는 필요 없는 sparse SfM "
@@ -129,10 +159,25 @@ def main(argv: list[str] | None = None) -> int:
     mesh = trimesh.load(mesh_path, process=False)
     mesh, scale_factor = finalize_mesh(
         mesh, reference_length_mm=args.reference_length_mm, trim_leg=args.trim_leg,
+        target_vertices=args.target_vertices,
     )
     mesh.export(mesh_path)
 
     print(f"\n최종 메쉬: {mesh_path} (정점 {len(mesh.vertices):,}개, 스케일 x{scale_factor:.4f})")
+
+    if args.floor_contact_tolerance_mm is not None:
+        # finalize_mesh() 기본값(z_up=True)이라 mesh는 Z-up 좌표계 -- Z축 기준으로 잰다.
+        mask = find_floor_contact_mask(mesh, tolerance_mm=args.floor_contact_tolerance_mm, up_axis=2)
+        mask_path = mesh_path.with_name(f"{mesh_path.stem}_floor_contact.npy")
+        np.save(mask_path, mask)
+        print(f"[floor-contact] 저장: {mask_path}")
+
+    if args.glb_export:
+        # glTF 규약(Y-up)에 맞춰 되돌려서 저장 -- 정점 순서는 그대로라 위 접지 마스크를
+        # 이 glb에도 그대로 대응시킬 수 있다.
+        glb_path = mesh_path.with_suffix(".glb")
+        to_y_up(mesh).export(glb_path)
+        print(f"[glb] 저장: {glb_path} (Y-up)")
 
     if args.cleanup_sfm_scratch:
         removed = []

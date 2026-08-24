@@ -139,17 +139,13 @@ def run_sparse_sfm(
 ) -> pycolmap.Reconstruction:
     """이미지 폴더에서 exhaustive 매칭 + incremental SfM으로 sparse 복원을 만든다.
 
-    image_names: 지정하면 이 파일들만 사용(블러 필터링된 목록 등).
-    masks_dir: 지정하면 `<파일명>.png` 마스크(0=제외, 그 외=포함)로 배경 특징점
-        추출을 막는다. `masking.generate_masks()`로 미리 만들어 둘 것. 단,
-        배경이 (텍스처 있는 바닥재 등) 피사체와 함께 완전히 고정돼 있는
-        촬영에서는 오히려 손해다 — 배경이 저텍스처 피부보다 SIFT 특징점을
-        더 잘 잡아줘서 등록에 도움이 될 수 있기 때문. 배경이 복잡/혼재
-        (다른 피사체가 지나감 등)할 때만 쓸 것.
-    max_features / peak_threshold: SIFT 특징점 추출 파라미터(모듈 상단
-        기본값 참고).
-    ransac_max_error: 매칭 단계 기하 검증(RANSAC) 인라이어 허용 오차(px,
-        모듈 상단 기본값 참고).
+    - image_names: 지정하면 이 파일들만 사용(블러 필터링된 목록 등).
+    - masks_dir: 지정하면 <파일명>.png 마스크(0=제외)로 배경 특징점 추출을
+      막는다(masking.generate_masks() 결과). 배경이 피사체와 함께 완전히
+      고정된 촬영에서는 오히려 손해(저텍스처 피부보다 SIFT를 더 잘 잡아줌)
+      -- 배경이 복잡/혼재할 때만 쓸 것.
+    - max_features/peak_threshold: SIFT 특징점 추출 파라미터(모듈 상단 기본값).
+    - ransac_max_error: 매칭 단계 RANSAC 인라이어 허용 오차(px).
     """
     db_path = workdir / "database.db"
     sparse_dir = workdir / "sparse"
@@ -199,12 +195,10 @@ def run_sparse_sfm(
 def report_unregistered_frames(
     images_dir: Path, recon: pycolmap.Reconstruction, candidate_names: list[str]
 ) -> None:
-    """등록 실패한 프레임을 선명도 오름차순(흐린 것부터)으로 보여준다 — 실패 원인 진단용.
+    """등록 실패한 프레임을 선명도 오름차순으로 보여준다 -- 실패 원인 진단용.
 
-    블러가 등록 실패의 가장 흔한 원인이다 — 미등록 프레임들의 선명도가
-    유독 낮게 몰려 있으면 블러가 원인일 가능성이 높고, 선명도가 정상 범위인데도
-    미등록이면 그 프레임에서만 자세가 흔들렸거나 각도가 앞뒤 프레임과 너무 달랐을
-    가능성을 의심해야 한다.
+    - 블러가 가장 흔한 원인. 미등록 프레임 선명도가 유독 낮으면 블러 의심,
+      정상 범위인데도 미등록이면 자세 흔들림/각도 편차 의심.
     """
     registered = {im.name for im in recon.images.values()}
     missing = [name for name in candidate_names if name not in registered]
