@@ -563,23 +563,6 @@ def run_refine_mesh(
     return workdir / output_name.replace(".mvs", ".ply")
 
 
-def align_principal_axes(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
-    """PCA 주축을 좌표축(X=최장, Y=중간, Z=최단)에 맞춘다(중심은 원점).
-
-    - 축만 정렬, 부호(위/앞 방향)는 정하지 않음 -- 발바닥 방향까지 정하려면
-      align_sole_down() 사용.
-    - 행렬식 -1(반사)이면 마지막 축 부호를 뒤집어 순수 회전만 적용.
-    """
-    axes = pca_axes(mesh.vertices)
-    if np.linalg.det(axes) < 0:
-        axes = axes.copy()
-        axes[:, -1] *= -1.0
-    centroid = mesh.vertices.mean(axis=0)
-    aligned = mesh.copy()
-    aligned.vertices = (mesh.vertices - centroid) @ axes
-    return aligned
-
-
 def _fibonacci_sphere(n: int) -> np.ndarray:
     """구 표면에 n개 방향을 고르게 뿌린다((n, 3) 단위벡터, 피보나치 나선)."""
     i = np.arange(n)
@@ -635,7 +618,7 @@ def align_sole_down(
     n_surface_samples: int = 20_000,
     rng: np.random.Generator | None = None,
 ) -> trimesh.Trimesh:
-    """align_principal_axes()의 다음 단계 -- 발바닥까지 검출해 X=길이축,
+    """PCA 주축을 좌표축에 맞추고, 발바닥까지 검출해 X=길이축,
     Y=높이축(발바닥 -Y), Z=너비축으로 맞춘다(중심 원점).
 
     find_sole_direction() 사용(표면적 균등 샘플로 삼각화 밀도 편향 회피).
@@ -956,6 +939,11 @@ def run_dense_pipeline(
     sand_iterations: int = 3,
     finish_smooth: bool = True,
     finish_smooth_lambda: float = 0.5,
+    # 40 -- stl_foot_extract 쪽(finishing.py)의 10과 값이 다른 건 의도된 것.
+    # 거긴 이 스무딩 뒤에 decimate_mesh()가 축약+재스무딩을 한 번 더 해서
+    # 반복횟수 영향이 최종 결과에 거의 안 남지만(실측 확인됨), target_vertices를
+    # 안 쓰는 이 경로는 이게 진짜 마지막 스무딩이라 반복횟수에 비례해 실제로
+    # 수축한다(40회=PCA 길이 약 -1.5%, 실측). 둘을 맞추려 하지 말 것.
     finish_smooth_iterations: int = 40,
     prune_protrusions: bool = False,
     target_vertices: int | None = None,

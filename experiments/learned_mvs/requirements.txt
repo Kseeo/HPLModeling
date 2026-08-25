@@ -1,0 +1,8 @@
+# experiments/learned_mvs/ 전용 추가 의존성 -- 메인 프로젝트에는 안 넣는다.
+# torch/torchvision은 CUDA 빌드가 드라이버 버전에 따라 달라 pip install만으로는
+# 안 될 수 있음 -- README.md의 설치 예시(cu121 인덱스) 참고, 필요시 조정할 것.
+torch
+torchvision
+opencv-python
+plyfile
+tensorboard

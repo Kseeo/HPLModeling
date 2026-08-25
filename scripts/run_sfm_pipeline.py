@@ -73,6 +73,12 @@ def main(argv: list[str] | None = None) -> int:
         help="QA용 cleaned_points.ply에 DBSCAN 군집화를 적용하지 않는다(기본은 적용). "
              "최종 dense 메쉬에는 영향 없음.",
     )
+    parser.add_argument(
+        "--target-vertices", type=int, default=None,
+        help="지정하면 최종 메쉬를 이 정점 수 근방까지 단순화한 뒤 마감 스무딩한다 "
+             "(다른 데이터셋/모델의 메쉬 해상도에 맞출 때). 스무딩 전에 먼저 축약되므로 "
+             "고곡률 스무딩이 훨씬 빨라진다.",
+    )
     add_dense_args(parser, thread_flag="--dense-max-threads", thread_dest="dense_max_threads")
     args = parser.parse_args(argv)
 
@@ -120,6 +126,7 @@ def main(argv: list[str] | None = None) -> int:
         finish_smooth=args.finish_smooth, finish_smooth_lambda=args.finish_smooth_lambda,
         finish_smooth_iterations=args.finish_smooth_iterations,
         prune_protrusions=args.prune_protrusions,
+        target_vertices=args.target_vertices,
         trim_leg=args.trim_leg,
         keep_intermediates=args.keep_intermediates,
     )
