@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>Foot GLB Pipeline</title>
+<script type="module" src="https://unpkg.com/@google/model-viewer/dist/model-viewer.min.js"></script>
+<style>
+  body { font-family: -apple-system, "Malgun Gothic", sans-serif; margin: 0; padding: 20px; background: #111; color: #eee; }
+  h1 { font-size: 20px; }
+  .stages { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-top: 16px; }
+  .stage { background: #1b1b1b; border: 1px solid #333; border-radius: 8px; padding: 10px; display: flex; flex-direction: column; gap: 8px; }
+  .stage h2 { font-size: 14px; margin: 0; }
+  model-viewer { width: 100%; height: 260px; background: #222; border-radius: 6px; }
+  button { background: #2d6cdf; color: #fff; border: none; padding: 8px 10px; border-radius: 6px; cursor: pointer; font-size: 13px; }
+  button:disabled { background: #444; cursor: not-allowed; }
+  .info { font-size: 12px; color: #9c9; white-space: pre-wrap; word-break: break-all; }
+  .err { font-size: 12px; color: #f66; white-space: pre-wrap; word-break: break-all; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  input[type=text], input[type=number], select { background: #222; color: #eee; border: 1px solid #444; border-radius: 4px; padding: 6px; font-size: 12px; }
+  label { font-size: 12px; color: #aaa; }
+  a { color: #6cf; }
+  .adv { font-size: 12px; color: #aaa; }
+  .adv summary { cursor: pointer; }
+</style>
+</head>
+<body>
+<h1>발 스캔 GLB 파이프라인 (로컬)</h1>
+<div class="row">
+  <input type="file" id="fileInput" accept=".glb,.gltf">
+  <button id="uploadBtn">업로드</button>
+  <span id="uploadInfo" class="info"></span>
+</div>
+
+<div class="stages">
+  <div class="stage">
+    <h2>1단계: 크롭 + 발목 절단</h2>
+    <details class="adv"><summary>옵션</summary>
+      <label>target_vertices <input type="number" id="s1_target_vertices" value="18119" style="width:80px"></label>
+      <label><input type="checkbox" id="s1_trim_leg" checked> trim_leg</label>
+      <label>reference_length_mm <input type="number" id="s1_ref_len" placeholder="(선택)" style="width:80px"></label><br>
+      <label><input type="checkbox" id="s1_two_pass"> 2-pass 재프레이밍 (배경이 씬 대부분을 차지하는 스캔용, 배경 적은 정상 스캔엔 끄고 쓸 것)</label>
+    </details>
+    <button id="run1" disabled>1단계 실행</button>
+    <model-viewer id="mv1" camera-controls auto-rotate></model-viewer>
+    <div id="info1" class="info"></div>
+    <a id="dl1" style="display:none" download>GLB 다운로드</a>
+  </div>
+
+  <div class="stage">
+    <h2>2단계: 스무딩</h2>
+    <details class="adv"><summary>옵션</summary>
+      <label><input type="checkbox" id="s2_fill_round" checked> 원형 구멍 메움(발목 절단면은 그대로 두고, 발뒤꿈치 등 둥근 결손 구멍만 자동으로 닫음)</label><br>
+      <label>최소 원형도 <input type="number" id="s2_min_circ" value="0.5" step="0.05" min="0" max="1" style="width:70px"></label>
+    </details>
+    <button id="run2" disabled>2단계 실행</button>
+    <model-viewer id="mv2" camera-controls auto-rotate></model-viewer>
+    <div id="info2" class="info"></div>
+    <a id="dl2" style="display:none" download>GLB 다운로드</a>
+  </div>
+
+  <div class="stage">
+    <h2>3단계: GNN 추론</h2>
+    <details class="adv" open><summary>옵션 (필수 확인)</summary>
+      <label>checkpoint
+        <select id="s3_checkpoint">
+          {% for c in checkpoints %}<option value="{{ c }}">{{ c }}</option>{% endfor %}
+        </select>
+      </label><br>
+      <label>train_dataset_path (C3_bio.pt가 있는 폴더)
+        <input type="text" id="s3_train_path" placeholder="예: C:/Users/.../hplAI" style="width:220px">
+      </label><br>
+      <label>train_dataset_file <input type="text" id="s3_train_file" value="C3_bio.pt" style="width:120px"></label>
+      <label>target_faces <input type="number" id="s3_target_faces" placeholder="(선택)" style="width:80px"></label>
+      <label><input type="checkbox" id="s3_cpu"> CPU 강제</label>
+    </details>
+    <button id="run3" disabled>3단계 실행 (GNN)</button>
+    <model-viewer id="mv3" camera-controls auto-rotate></model-viewer>
+    <div id="info3" class="info"></div>
+    <a id="dl3" style="display:none" download>GLB 다운로드</a>
+  </div>
+
+  <div class="stage">
+    <h2>4단계: 후처리 스무딩</h2>
+    <details class="adv"><summary>옵션</summary>
+      <label>iterations <input type="number" id="s4_iterations" value="10" style="width:80px"></label>
+      <label>lamb <input type="number" id="s4_lamb" value="0.5" step="0.1" style="width:80px"></label>
+      <label><input type="checkbox" id="s4_rest" checked> 바닥 재접지</label>
+    </details>
+    <button id="run4" disabled>4단계 실행</button>
+    <model-viewer id="mv4" camera-controls auto-rotate></model-viewer>
+    <div id="info4" class="info"></div>
+    <a id="dl4" style="display:none" download>GLB 다운로드</a>
+  </div>
+</div>
+
+<script>
+let jobId = null;
+
+function setBusy(btn, busy, label) {
+  btn.disabled = busy;
+  if (busy) btn.dataset.label = btn.textContent, btn.textContent = "실행 중...";
+  else btn.textContent = btn.dataset.label || label;
+}
+
+async function postJSON(url, body) {
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body || {}),
+  });
+  const data = await res.json();
+  if (!res.ok) throw data;
+  return data;
+}
+
+function showResult(stage, data) {
+  const url = `/jobs/${jobId}/${data.file}`;
+  document.getElementById(`mv${stage}`).src = url;
+  document.getElementById(`info${stage}`).textContent =
+    `정점 ${data.n_vertices ?? "-"}, 면 ${data.n_faces ?? "-"}` +
+    (data.steps_applied ? `\n적용: ${data.steps_applied.join(", ")}` : "");
+  document.getElementById(`info${stage}`).className = "info";
+  const dl = document.getElementById(`dl${stage}`);
+  dl.href = url; dl.download = data.file; dl.style.display = "inline";
+}
+
+function showError(stage, err) {
+  const el = document.getElementById(`info${stage}`);
+  el.className = "err";
+  el.textContent = (err.error || "오류") + (err.log ? "\n\n" + err.log : "");
+}
+
+document.getElementById("uploadBtn").onclick = async () => {
+  const f = document.getElementById("fileInput").files[0];
+  if (!f) return alert("파일을 선택하세요");
+  const fd = new FormData();
+  fd.append("file", f);
+  const res = await fetch("/api/upload", { method: "POST", body: fd });
+  const data = await res.json();
+  if (!res.ok) return alert(data.error || "업로드 실패");
+  jobId = data.job_id;
+  document.getElementById("uploadInfo").textContent = `job_id=${jobId} (${data.filename})`;
+  document.getElementById("run1").disabled = false;
+};
+
+document.getElementById("run1").onclick = async () => {
+  const btn = document.getElementById("run1");
+  setBusy(btn, true);
+  try {
+    const data = await postJSON(`/api/stage1/${jobId}`, {
+      target_vertices: parseInt(document.getElementById("s1_target_vertices").value || "18119"),
+      trim_leg: document.getElementById("s1_trim_leg").checked,
+      reference_length_mm: parseFloat(document.getElementById("s1_ref_len").value) || null,
+      two_pass: document.getElementById("s1_two_pass").checked,
+    });
+    showResult(1, data);
+    document.getElementById("run2").disabled = false;
+  } catch (err) { showError(1, err); }
+  setBusy(btn, false, "1단계 실행");
+};
+
+document.getElementById("run2").onclick = async () => {
+  const btn = document.getElementById("run2");
+  setBusy(btn, true);
+  try {
+    const data = await postJSON(`/api/stage2/${jobId}`, {
+      fill_round_holes: document.getElementById("s2_fill_round").checked,
+      fill_round_holes_min_circularity: parseFloat(document.getElementById("s2_min_circ").value || "0.5"),
+    });
+    showResult(2, data);
+    document.getElementById("run3").disabled = false;
+  } catch (err) { showError(2, err); }
+  setBusy(btn, false, "2단계 실행");
+};
+
+document.getElementById("run3").onclick = async () => {
+  const btn = document.getElementById("run3");
+  setBusy(btn, true);
+  try {
+    const data = await postJSON(`/api/stage3/${jobId}`, {
+      checkpoint: document.getElementById("s3_checkpoint").value,
+      train_dataset_path: document.getElementById("s3_train_path").value,
+      train_dataset_file: document.getElementById("s3_train_file").value,
+      target_faces: parseInt(document.getElementById("s3_target_faces").value) || null,
+      cpu: document.getElementById("s3_cpu").checked,
+    });
+    showResult(3, data);
+    document.getElementById("run4").disabled = false;
+  } catch (err) { showError(3, err); }
+  setBusy(btn, false, "3단계 실행 (GNN)");
+};
+
+document.getElementById("run4").onclick = async () => {
+  const btn = document.getElementById("run4");
+  setBusy(btn, true);
+  try {
+    const data = await postJSON(`/api/stage4/${jobId}`, {
+      iterations: parseInt(document.getElementById("s4_iterations").value || "10"),
+      lamb: parseFloat(document.getElementById("s4_lamb").value || "0.5"),
+      rest_on_floor: document.getElementById("s4_rest").checked,
+    });
+    showResult(4, data);
+  } catch (err) { showError(4, err); }
+  setBusy(btn, false, "4단계 실행");
+};
+</script>
+</body>
+</html>

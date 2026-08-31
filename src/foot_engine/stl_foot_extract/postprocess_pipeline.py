@@ -22,6 +22,7 @@ import trimesh
 
 from foot_engine.sfm.dense import finalize_mesh, find_floor_contact_mask
 
+from .branch_cut import suggest_bend_components
 from .finishing import postprocess_mesh
 from .texture_crop import extract_by_skin_vote, load_textured_mesh
 
@@ -45,6 +46,15 @@ def process_glb_to_foot(
     resolution: int = 640,
     vote_threshold: float = 0.5,
     close_gap_radius_mult: float = 25.0,
+    two_pass: bool = False,
+    coarse_vote_threshold: float = 0.7,
+    coarse_pad_ratio: float = 0.2,
+    recover_holes: bool = False,
+    recover_min_circularity: float = 0.35,
+    recover_max_diag_ratio: float = 0.3,
+    recover_radius_mult: float = 2.0,
+    prune_bent_branches: bool = False,
+    prune_bent_branches_kwargs: dict | None = None,
     # 2) 크롭 직후 정리/스무딩
     postprocess: bool = True,
     sand_iterations: int = 3,
@@ -67,6 +77,18 @@ def process_glb_to_foot(
     `align`, `trim_leg`, `target_vertices`, `floor_contact_tolerance_mm`).
 
     Args:
+        two_pass: 배경이 씬 대부분을 차지하는 입력에서 발이 각 렌더 화면의
+            일부로만 찍혀 피부투표가 실패하는 문제를 완화하지만, 배경이 적은
+            정상 입력에서는 오히려 회귀(가느다란 실 아티팩트)를 만드는 게
+            실측으로 확인돼 기본 꺼짐(`extract_by_skin_vote` 참고) -- 배경이
+            씬 대부분인 케이스에서만 켜서 쓸 것.
+        prune_bent_branches: 크롭 직후, 말단에서 진행방향이 꺾이는 지점
+            (`branch_cut.suggest_bend_components`)을 찾아 위상적으로 자르고
+            가장 큰 조각만 남긴다 -- 얇은 다리로 이어져 `close_gap`/거리 기반
+            정리로는 안 떨어지는 배경 파편에 유효(실측: project_5). 발가락처럼
+            진짜 발의 일부까지 갈라낼 위험이 있어(이 기법 과거 다른 용도로
+            실패 이력 있음, `branch_cut.py` 참고) 기본 꺼짐 -- 결과를 반드시
+            확인하며 쓸 것.
         trim_leg: 발목 위 다리까지 찍힌 패턴이 뚜렷하면 잘라낸다(`finalize_mesh`
             참고). 기본 꺼짐.
         target_vertices: 지정하면 이 정점 수 근방까지 단순화+스무딩한다(다른
@@ -86,8 +108,21 @@ def process_glb_to_foot(
     result = extract_by_skin_vote(
         mesh, n_views=n_views, resolution=(resolution, int(resolution * 0.75)),
         vote_threshold=vote_threshold, close_gap_radius_mult=close_gap_radius_mult,
+        two_pass=two_pass, coarse_vote_threshold=coarse_vote_threshold, coarse_pad_ratio=coarse_pad_ratio,
+        recover_holes=recover_holes, recover_min_circularity=recover_min_circularity,
+        recover_max_diag_ratio=recover_max_diag_ratio, recover_radius_mult=recover_radius_mult,
     )
     out_mesh = result.mesh
+
+    if prune_bent_branches:
+        n_before = len(out_mesh.vertices)
+        components = suggest_bend_components(out_mesh, **(prune_bent_branches_kwargs or {}))
+        if len(components) > 1:
+            out_mesh = components[0].mesh
+            print(
+                f"[foot-pipeline] 꺾임 감지로 배경/파편 조각 분리: {len(components)}개 중 "
+                f"가장 큰 것만 채택(정점 {n_before:,} -> {len(out_mesh.vertices):,})"
+            )
 
     if postprocess:
         out_mesh, _ = postprocess_mesh(

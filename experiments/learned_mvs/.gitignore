@@ -1,0 +1,6 @@
+# 외부 코드(clone) -- 커밋 안 함, setup_vendor.py로 언제든 재생성
+_vendor/
+
+# 실행 산출물
+*.ply
+__pycache__/

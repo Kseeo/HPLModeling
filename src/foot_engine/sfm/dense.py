@@ -563,23 +563,6 @@ def run_refine_mesh(
     return workdir / output_name.replace(".mvs", ".ply")
 
 
-def align_principal_axes(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
-    """PCA 주축을 좌표축(X=최장, Y=중간, Z=최단)에 맞춘다(중심은 원점).
-
-    - 축만 정렬, 부호(위/앞 방향)는 정하지 않음 -- 발바닥 방향까지 정하려면
-      align_sole_down() 사용.
-    - 행렬식 -1(반사)이면 마지막 축 부호를 뒤집어 순수 회전만 적용.
-    """
-    axes = pca_axes(mesh.vertices)
-    if np.linalg.det(axes) < 0:
-        axes = axes.copy()
-        axes[:, -1] *= -1.0
-    centroid = mesh.vertices.mean(axis=0)
-    aligned = mesh.copy()
-    aligned.vertices = (mesh.vertices - centroid) @ axes
-    return aligned
-
-
 def _fibonacci_sphere(n: int) -> np.ndarray:
     """구 표면에 n개 방향을 고르게 뿌린다((n, 3) 단위벡터, 피보나치 나선)."""
     i = np.arange(n)
@@ -635,7 +618,7 @@ def align_sole_down(
     n_surface_samples: int = 20_000,
     rng: np.random.Generator | None = None,
 ) -> trimesh.Trimesh:
-    """align_principal_axes()의 다음 단계 -- 발바닥까지 검출해 X=길이축,
+    """PCA 주축을 좌표축에 맞추고, 발바닥까지 검출해 X=길이축,
     Y=높이축(발바닥 -Y), Z=너비축으로 맞춘다(중심 원점).
 
     find_sole_direction() 사용(표면적 균등 샘플로 삼각화 밀도 편향 회피).
@@ -668,6 +651,45 @@ def align_sole_down(
     return aligned
 
 
+def prune_far_fragments(
+    mesh: trimesh.Trimesh,
+    *,
+    distance_percentile: float = 95.0,
+    margin_mult: float = 1.4,
+) -> trimesh.Trimesh:
+    """`align_sole_down()` 이후(X=길이축, Z=너비축) 발 몸통에서 수평으로 멀리
+    떨어진 정점(배경 파편이 얇은 다리로 이어져 위상적으로는 안 떨어지는
+    경우)을 잘라내고 다시 최대 연결요소만 남긴다.
+
+    실측(project_5): 발 몸통은 수평거리 90퍼센타일이 93mm인데 배경 파편은
+    최대 147mm까지 뻗어있음 -- `keep_largest_component()`(위상 기반)로는 안
+    떨어지지만(얇은 다리로 이어져 있어 같은 연결요소), 이 거리 기반 크롭은
+    떨어진다. `_recover_holes_from_original()`이 되살린 배경 조각을 다시
+    쳐내는 안전판 성격 -- 발 자체의 원형도 낮은 부위(발가락 벌어짐 등)까지
+    치지 않도록 퍼센타일 기반(고정 mm 아님) + 넉넉한 마진(1.4배)을 쓴다.
+    """
+    v = mesh.vertices
+    center = np.median(v[:, [0, 2]], axis=0)  # X=길이, Z=너비 (align_sole_down 직후 관례)
+    dist = np.linalg.norm(v[:, [0, 2]] - center, axis=1)
+    threshold = float(np.percentile(dist, distance_percentile)) * margin_mult
+    keep = dist <= threshold
+    if keep.all():
+        return mesh
+
+    face_mask = keep[mesh.faces].all(axis=1)
+    out = mesh.copy()
+    out.update_faces(face_mask)
+    out.remove_unreferenced_vertices()
+
+    out, faces_before, faces_after = keep_largest_component(out)
+    if faces_after < faces_before or not keep.all():
+        print(
+            f"[정리] 발에서 수평으로 멀리 떨어진 파편 제거: 정점 {len(mesh.vertices):,} -> "
+            f"{len(out.vertices):,}(거리 임계 {threshold:.4g})"
+        )
+    return out
+
+
 def find_ankle_cut_height(
     mesh: trimesh.Trimesh,
     *,
@@ -678,6 +700,7 @@ def find_ankle_cut_height(
     rebound_ratio: float = 1.15,
     extra_margin_bins: int = 3,
     max_length_ratio: float = 0.40,
+    safety_height_ratio: float = 0.50,
     near_floor_ratio: float = 0.12,
     n_surface_samples: int = 20_000,
     rng: np.random.Generator | None = None,
@@ -697,6 +720,12 @@ def find_ankle_cut_height(
     - 폭 곡선 모양이 스캔마다 달라 절단 비율 편차가 커서(실측 0.37~0.70)
       max_length_ratio * 발_길이로 상한 추가. 발_길이는 바닥 근처
       (near_floor_ratio) 점들의 X축 범위로 근사.
+    - safety_height_ratio: 반등 패턴을 못 찾아도(종아리가 완만하게만
+      굵어지는 경우, 실측: project_6 -- 반등 1.09배로 rebound_ratio=1.15를
+      살짝 못 넘김) 전체 높이가 발_길이의 이 비율을 넘으면 다리 포함으로
+      보고 max_length_ratio 지점에서 그냥 자른다. rebound_ratio 자체는
+      과거 여러 샘플로 튜닝된 값이라 건드리지 않고, 그 판정이 실패했을 때만
+      작동하는 별도 안전판.
     - Returns: 자를 높이(Y). 패턴이 뚜렷하지 않으면 None(안전 우선 -- 정상
       발을 잘못 자르는 것보다 다리 케이스를 놓치는 쪽을 택함).
     """
@@ -742,6 +771,16 @@ def find_ankle_cut_height(
                 if foot_length is not None:
                     cut_height = min(cut_height, max_length_ratio * foot_length)
                 return cut_height
+
+    # 폭 반등 패턴을 못 찾았어도(예: 종아리가 완만하게만 굵어져 rebound_ratio를
+    # 못 넘김, 실측: project_6) 전체 높이가 발_길이 대비 명백히 비정상으로 크면
+    # 다리가 찍힌 것으로 보고 안전 상한(max_length_ratio)에서 그냥 자른다.
+    # rebound_ratio 자체는 과거 여러 샘플로 조정된 값이라 건드리지 않고, 이건
+    # 그 판정이 실패했을 때만 작동하는 별도의 안전판.
+    if foot_length is not None and foot_length > 0:
+        total_height = float(y.max() - y.min())
+        if total_height > safety_height_ratio * foot_length:
+            return max_length_ratio * foot_length
     return None
 
 
@@ -879,6 +918,7 @@ def finalize_mesh(
     z_up: bool = True,
     trim_leg: bool = False,
     target_vertices: int | None = None,
+    prune_far_fragments_enabled: bool = True,
 ) -> tuple[trimesh.Trimesh, float]:
     """run_dense_pipeline()이 만든 원본 메쉬를 축 정렬+스케일링+바닥 정착까지
     마친 최종 메쉬로 만든다. run_pipeline()과 run_dense_pipeline.py가 공유.
@@ -888,6 +928,8 @@ def finalize_mesh(
       뚜렷할 때만).
     - target_vertices(None): 지정 시 decimate_mesh()로 단순화+마감 스무딩 후
       rest_on_floor() 재적용(접지 재보정).
+    - prune_far_fragments_enabled(True): 정렬 후 발 몸통에서 수평으로 멀리
+      떨어진 파편(`prune_far_fragments()`)을 잘라낸다.
     - Returns: (정렬/스케일/접지 완료된 메쉬, 적용된 스케일 배율)
     """
     mesh, faces_before, faces_after = keep_largest_component(mesh)
@@ -897,6 +939,8 @@ def finalize_mesh(
     mesh = align_sole_down(mesh)
     if trim_leg:
         mesh = trim_leg_above_ankle(mesh)
+    if prune_far_fragments_enabled:
+        mesh = prune_far_fragments(mesh)
 
     resolved_reference_length_mm = reference_length_mm
     if resolved_reference_length_mm is None:
@@ -956,6 +1000,11 @@ def run_dense_pipeline(
     sand_iterations: int = 3,
     finish_smooth: bool = True,
     finish_smooth_lambda: float = 0.5,
+    # 40 -- stl_foot_extract 쪽(finishing.py)의 10과 값이 다른 건 의도된 것.
+    # 거긴 이 스무딩 뒤에 decimate_mesh()가 축약+재스무딩을 한 번 더 해서
+    # 반복횟수 영향이 최종 결과에 거의 안 남지만(실측 확인됨), target_vertices를
+    # 안 쓰는 이 경로는 이게 진짜 마지막 스무딩이라 반복횟수에 비례해 실제로
+    # 수축한다(40회=PCA 길이 약 -1.5%, 실측). 둘을 맞추려 하지 말 것.
     finish_smooth_iterations: int = 40,
     prune_protrusions: bool = False,
     target_vertices: int | None = None,

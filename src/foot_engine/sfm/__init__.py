@@ -26,7 +26,6 @@ from .cleaning import (
     plane_removal_keep_mask,
 )
 from .dense import (
-    align_principal_axes,
     clean_dense_point_cloud,
     convert_masks_for_openmvs,
     largest_sparse_dir,
@@ -100,7 +99,6 @@ __all__ = [
     "run_reconstruct_mesh",
     "run_refine_mesh",
     "keep_largest_component",
-    "align_principal_axes",
     "run_dense_pipeline",
     # mesh_postprocess (배경/파편 제거 + 스무딩, 사진/카메라 불필요 -- 완성된 메쉬에도 독립 적용)
     "postprocess_mesh",
