@@ -33,6 +33,7 @@ import os
 import shutil
 import struct
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 
 import cv2
@@ -573,6 +574,34 @@ def _fibonacci_sphere(n: int) -> np.ndarray:
     return np.stack([r * np.cos(theta), r * np.sin(theta), z], axis=1)
 
 
+def _sole_direction_contact_counts(
+    surface_points: np.ndarray,
+    length_axis: np.ndarray,
+    *,
+    n_directions: int,
+    exclude_cone_deg: float,
+    contact_band_ratio: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """방향 후보(구면에 고르게 뿌린 것 중 길이축 근처 제외)별 접점 수를 센다.
+
+    `find_sole_direction()`/`find_sole_direction_candidates()`가 공유하는
+    핵심 계산. Returns: (directions, contact_counts) -- `directions[i]`가
+    "위(접점 반대쪽)" 방향, 발바닥 방향은 그 부호를 뒤집은 쪽.
+    """
+    directions = _fibonacci_sphere(n_directions)
+    cos_thresh = np.cos(np.radians(exclude_cone_deg))
+    keep = np.abs(directions @ length_axis) <= cos_thresh
+    directions = directions[keep]
+
+    diag = float(np.linalg.norm(surface_points.max(axis=0) - surface_points.min(axis=0)))
+    band = diag * contact_band_ratio
+
+    proj = surface_points @ directions.T  # (n_sample, n_kept_directions)
+    mins = proj.min(axis=0)
+    contact_counts = (proj <= (mins + band)).sum(axis=0)
+    return directions, contact_counts
+
+
 def find_sole_direction(
     surface_points: np.ndarray,
     length_axis: np.ndarray,
@@ -590,23 +619,83 @@ def find_sole_direction(
     - length_axis: 발 길이 방향 단위벡터.
     - contact_band_ratio: 접점 허용 오차(bounding diagonal 대비 비율).
     - Returns: 아래(발바닥) 방향 단위벡터.
+
+    1등이 항상 정답은 아니다(실측: 2위와 접점수 차이가 3배 안팎이면 확신할
+    만하지만, 1.3배 안팎으로 가까운 케이스에서 1등이 틀리고 2위가 맞는 사례
+    확인됨 -- 발이 옆으로 누운 채 정렬됨) -- 애매한 경우 사람이 고르게 하려면
+    `find_sole_direction_candidates()`로 후보 여러 개를 받을 것.
     """
-    sample = surface_points
-    directions = _fibonacci_sphere(n_directions)
-    cos_thresh = np.cos(np.radians(exclude_cone_deg))
-    keep = np.abs(directions @ length_axis) <= cos_thresh
-    directions = directions[keep]
+    return find_sole_direction_candidates(
+        surface_points, length_axis, k=1,
+        n_directions=n_directions, exclude_cone_deg=exclude_cone_deg,
+        contact_band_ratio=contact_band_ratio,
+    )[0].direction
 
-    diag = float(np.linalg.norm(sample.max(axis=0) - sample.min(axis=0)))
-    band = diag * contact_band_ratio
 
-    proj = sample @ directions.T  # (n_sample, n_kept_directions)
-    mins = proj.min(axis=0)
-    contact_counts = (proj <= (mins + band)).sum(axis=0)
+@dataclass(slots=True)
+class SoleDirectionCandidate:
+    """`find_sole_direction_candidates()`가 반환하는 후보 하나."""
 
-    # 접점은 뽑힌 방향의 "최솟값" 쪽 -> 발바닥 방향은 부호를 뒤집은 쪽.
-    best = int(np.argmax(contact_counts))
-    return -directions[best]
+    direction: np.ndarray  #: 발바닥(아래) 방향 단위벡터.
+    score: int  #: 접점 수(클수록 확신도 높음).
+
+
+def find_sole_direction_candidates(
+    surface_points: np.ndarray,
+    length_axis: np.ndarray,
+    *,
+    k: int = 5,
+    n_directions: int = 360,
+    exclude_cone_deg: float = 40.0,
+    contact_band_ratio: float = 0.03,
+    nms_deg: float = 25.0,
+) -> list[SoleDirectionCandidate]:
+    """`find_sole_direction()`과 같은 접점수 기준으로, 1등 하나 대신 서로
+    충분히 떨어진(`nms_deg`도 이상) 상위 `k`개 후보를 점수 내림차순으로 반환.
+
+    1등과 2등 접점수가 확실히 갈리면(실측: 정상 케이스 2.6~3배) 1등이 곧
+    정답이지만, 그 차이가 좁으면(실측: 1.3배 안팎, project 985651d7c759에서
+    재현) 1등이 틀리고 아래 순위에 정답이 있는 경우가 있다 -- 이럴 때 사람이
+    후보 중 골라 고르게 하려고 만든 함수.
+    """
+    directions, contact_counts = _sole_direction_contact_counts(
+        surface_points, length_axis, n_directions=n_directions,
+        exclude_cone_deg=exclude_cone_deg, contact_band_ratio=contact_band_ratio,
+    )
+    order = np.argsort(-contact_counts)
+    cos_nms = np.cos(np.radians(nms_deg))
+    chosen: list[int] = []
+    for i in order:
+        d = directions[i]
+        if all(np.dot(d, directions[j]) < cos_nms for j in chosen):
+            chosen.append(int(i))
+        if len(chosen) >= k:
+            break
+    return [SoleDirectionCandidate(direction=-directions[i], score=int(contact_counts[i])) for i in chosen]
+
+
+def sole_direction_candidates_for_mesh(
+    mesh: trimesh.Trimesh,
+    *,
+    k: int = 5,
+    n_surface_samples: int = 20_000,
+    rng: np.random.Generator | None = None,
+    **kwargs,
+) -> list[SoleDirectionCandidate]:
+    """`finalize_mesh()`가 `align_sole_down()` 직전에 보는 것과 같은 전처리
+    (`keep_largest_component`)를 거친 뒤 후보를 계산한다 -- 여기서 받은
+    방향을 그대로 `align_sole_down(down_direction=...)`/`finalize_mesh(
+    down_direction=...)`에 넣어도 좌표계(중심점/길이축)가 어긋나지 않도록
+    보장하는 용도. `kwargs`는 `find_sole_direction_candidates()`로 전달.
+    """
+    mesh, _, _ = keep_largest_component(mesh)
+    centroid = mesh.vertices.mean(axis=0)
+    c = mesh.vertices - centroid
+    length_axis = pca_axes(c)[:, 0]
+    if rng is None:
+        rng = np.random.default_rng(0)
+    surface_points, _ = trimesh.sample.sample_surface(mesh, n_surface_samples, seed=rng)
+    return find_sole_direction_candidates(surface_points - centroid, length_axis, k=k, **kwargs)
 
 
 def align_sole_down(
@@ -617,11 +706,19 @@ def align_sole_down(
     contact_band_ratio: float = 0.03,
     n_surface_samples: int = 20_000,
     rng: np.random.Generator | None = None,
+    down_direction: np.ndarray | None = None,
 ) -> trimesh.Trimesh:
     """PCA 주축을 좌표축에 맞추고, 발바닥까지 검출해 X=길이축,
     Y=높이축(발바닥 -Y), Z=너비축으로 맞춘다(중심 원점).
 
     find_sole_direction() 사용(표면적 균등 샘플로 삼각화 밀도 편향 회피).
+
+    down_direction: 지정하면 자동 탐색을 건너뛰고 이 방향(원본 메쉬 좌표계
+    기준 단위벡터가 아니어도 됨, 내부에서 정규화)을 발바닥으로 쓴다 --
+    `find_sole_direction_candidates()`가 준 후보 중 사람이 고른 걸 그대로
+    넣는 용도(자동 1등이 가끔 틀려서, 실측: project 985651d7c759에서 발이
+    옆으로 누운 채 정렬됨 -- 접점수 1위/2위 차이가 1.3배로 좁은 애매한
+    케이스, 2위가 정답이었음).
     """
     if rng is None:
         rng = np.random.default_rng(0)
@@ -630,12 +727,16 @@ def align_sole_down(
     c = mesh.vertices - centroid
 
     length_axis = pca_axes(c)[:, 0]
-    surface_points, _ = trimesh.sample.sample_surface(mesh, n_surface_samples, seed=rng)
-    down = find_sole_direction(
-        surface_points - centroid, length_axis,
-        n_directions=n_directions, exclude_cone_deg=exclude_cone_deg,
-        contact_band_ratio=contact_band_ratio,
-    )
+    if down_direction is not None:
+        down = np.asarray(down_direction, dtype=np.float64)
+        down = down / np.linalg.norm(down)
+    else:
+        surface_points, _ = trimesh.sample.sample_surface(mesh, n_surface_samples, seed=rng)
+        down = find_sole_direction(
+            surface_points - centroid, length_axis,
+            n_directions=n_directions, exclude_cone_deg=exclude_cone_deg,
+            contact_band_ratio=contact_band_ratio,
+        )
 
     y_axis = -down
     x_axis = length_axis - (length_axis @ y_axis) * y_axis  # y_axis에 재직교화
@@ -699,7 +800,7 @@ def find_ankle_cut_height(
     rebound_lookahead_bins: int = 10,
     rebound_ratio: float = 1.15,
     extra_margin_bins: int = 3,
-    max_length_ratio: float = 0.40,
+    max_length_ratio: float = 0.25,
     safety_height_ratio: float = 0.50,
     near_floor_ratio: float = 0.12,
     n_surface_samples: int = 20_000,
@@ -720,6 +821,11 @@ def find_ankle_cut_height(
     - 폭 곡선 모양이 스캔마다 달라 절단 비율 편차가 커서(실측 0.37~0.70)
       max_length_ratio * 발_길이로 상한 추가. 발_길이는 바닥 근처
       (near_floor_ratio) 점들의 X축 범위로 근사.
+      기본값 0.25는 2026-09-01 재조정(이전 0.40) -- 반등 패턴을 못 찾아
+      이 상한이 그대로 절단선이 되는 샘플(project_5, project_228)에서
+      다리가 과하게 남는다는 지적으로 0.40/0.25/0.20/0.15를 렌더 비교,
+      0.25에서도 발목뼈 융기는 안 잘림 확인. 반등 패턴을 이미 찾아 이
+      상한이 안 걸리는 샘플(project_230)은 절단선 변화 없음(회귀 없음).
     - safety_height_ratio: 반등 패턴을 못 찾아도(종아리가 완만하게만
       굵어지는 경우, 실측: project_6 -- 반등 1.09배로 rebound_ratio=1.15를
       살짝 못 넘김) 전체 높이가 발_길이의 이 비율을 넘으면 다리 포함으로
@@ -919,6 +1025,8 @@ def finalize_mesh(
     trim_leg: bool = False,
     target_vertices: int | None = None,
     prune_far_fragments_enabled: bool = True,
+    decimate_smooth_after: bool = True,
+    down_direction: np.ndarray | None = None,
 ) -> tuple[trimesh.Trimesh, float]:
     """run_dense_pipeline()이 만든 원본 메쉬를 축 정렬+스케일링+바닥 정착까지
     마친 최종 메쉬로 만든다. run_pipeline()과 run_dense_pipeline.py가 공유.
@@ -928,15 +1036,25 @@ def finalize_mesh(
       뚜렷할 때만).
     - target_vertices(None): 지정 시 decimate_mesh()로 단순화+마감 스무딩 후
       rest_on_floor() 재적용(접지 재보정).
+    - decimate_smooth_after(True): decimate_mesh()의 축약 직후 마감 스무딩
+      (finish_smooth_mesh(), 라플라시안 5회) 여부. 호출부가 이 뒤에 별도
+      스무딩 단계(예: postprocess_mesh())를 이미 예정하고 있으면 False로
+      꺼서 중복을 피할 것 -- 축약 자체가 남기는 아티팩트는 어차피 그 단계가
+      치운다(실측: 꺼도 이후 postprocess_mesh() 통과 후 결과 동일).
     - prune_far_fragments_enabled(True): 정렬 후 발 몸통에서 수평으로 멀리
       떨어진 파편(`prune_far_fragments()`)을 잘라낸다.
+    - down_direction: 지정하면 `align_sole_down()`의 자동 방향 탐색 대신
+      이 방향을 발바닥으로 쓴다. `sole_direction_candidates_for_mesh(mesh)`가
+      준 후보(이 함수가 내부적으로 거치는 것과 같은 전처리 기준)를 그대로
+      넣을 것 -- 다른 전처리를 거친 메쉬에서 뽑은 방향을 넣으면 좌표계가
+      어긋난다.
     - Returns: (정렬/스케일/접지 완료된 메쉬, 적용된 스케일 배율)
     """
     mesh, faces_before, faces_after = keep_largest_component(mesh)
     if faces_after < faces_before:
         print(f"[정리] 몸통과 떨어진 부유 조각 제거: 면 {faces_before:,} -> {faces_after:,}")
 
-    mesh = align_sole_down(mesh)
+    mesh = align_sole_down(mesh, down_direction=down_direction)
     if trim_leg:
         mesh = trim_leg_above_ankle(mesh)
     if prune_far_fragments_enabled:
@@ -958,7 +1076,7 @@ def finalize_mesh(
     )
 
     if target_vertices is not None:
-        mesh = decimate_mesh(mesh, target_vertices=target_vertices)
+        mesh = decimate_mesh(mesh, target_vertices=target_vertices, smooth_after=decimate_smooth_after)
 
     mesh = rest_on_floor(mesh)
     if z_up:

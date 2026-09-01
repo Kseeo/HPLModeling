@@ -174,6 +174,96 @@ def split_at_bends(
 
 
 @dataclass(slots=True)
+class NeckCut:
+    """말단 하나에서 찾은 목(neck, 국소 단면이 좁아졌다 다시 넓어지는 지점)."""
+
+    tip_vertex: int
+    cut_distance: float
+    neck_width: int
+    widen_ratio: float
+
+
+def find_neck_cuts(
+    mesh: trimesh.Trimesh,
+    tips: list[BranchTip],
+    *,
+    band_width_edge_mult: float = 3.0,
+    widen_ratio: float = 3.0,
+    widen_search_bands: int = 5,
+    min_neck_vertices: int = 3,
+    smoothing_bands: int = 2,
+    max_search_ratio: float = 0.5,
+) -> list[NeckCut]:
+    """각 말단에서 몸통 쪽으로 걸어 들어가며 국소 단면 폭(밴드별 정점 수)의
+    골(valley)을 찾는다 -- `find_bend_cuts()`의 꺾임각 대신 폭을 본다.
+
+    발가락처럼 끝에서 몸통까지 단조롭게 넓어지는 정상 형태는 안 걸리고,
+    "얇아졌다가(골) 다시 확 넓어지는" 진짜 잘록한 목(가는 다리로 이어진
+    배경 파편 등)만 잡도록 국소 최솟값 + 그 직후 폭이 `widen_ratio`배
+    이상 넓어지는 조건을 같이 요구한다.
+    """
+    v = mesh.vertices
+    edge_len = np.linalg.norm(v[mesh.edges[:, 0]] - v[mesh.edges[:, 1]], axis=1)
+    band_width = float(np.median(edge_len)) * band_width_edge_mult
+    diag = float(np.linalg.norm(mesh.bounds[1] - mesh.bounds[0]))
+    max_dist = diag * max_search_ratio
+    n_bands = max(int(max_dist / band_width), smoothing_bands + widen_search_bands + 2)
+
+    cuts: list[NeckCut] = []
+    for tip in tips:
+        d = tip.dist_from_tip
+        in_range = d < n_bands * band_width
+        band_idx = np.clip((d / band_width).astype(int), 0, n_bands - 1)
+        counts = np.bincount(band_idx[in_range], minlength=n_bands)[:n_bands].astype(float)
+        if smoothing_bands > 1:
+            kernel = np.ones(smoothing_bands) / smoothing_bands
+            counts = np.convolve(counts, kernel, mode="same")
+
+        for i in range(1, n_bands - widen_search_bands):
+            if counts[i] < min_neck_vertices:
+                continue
+            if not (counts[i] <= counts[i - 1] and counts[i] <= counts[i + 1]):
+                continue  # 국소 최솟값(골)이 아님
+            after_peak = float(counts[i + 1:i + 1 + widen_search_bands].max())
+            ratio = after_peak / counts[i]
+            if ratio >= widen_ratio:
+                cuts.append(NeckCut(
+                    tip_vertex=tip.vertex, cut_distance=i * band_width,
+                    neck_width=int(counts[i]), widen_ratio=ratio,
+                ))
+                break  # 이 말단에서는 몸통에 가장 가까운(첫) 골 하나만
+
+    return cuts
+
+
+def split_at_necks(
+    mesh: trimesh.Trimesh,
+    tips: list[BranchTip],
+    cuts: list[NeckCut],
+    *,
+    ring_width_edge_mult: float = 1.5,
+) -> trimesh.Trimesh:
+    """`split_at_bends()`와 동일한 방식으로 목 지점의 얇은 정점 띠를 지워
+    위상적으로 끊는다."""
+    if not cuts:
+        return mesh
+
+    v = mesh.vertices
+    edge_len = np.linalg.norm(v[mesh.edges[:, 0]] - v[mesh.edges[:, 1]], axis=1)
+    ring_width = float(np.median(edge_len)) * ring_width_edge_mult
+
+    tip_by_vertex = {t.vertex: t for t in tips}
+    remove_mask = np.zeros(len(v), dtype=bool)
+    for cut in cuts:
+        d = tip_by_vertex[cut.tip_vertex].dist_from_tip
+        remove_mask |= np.abs(d - cut.cut_distance) <= ring_width
+
+    if not remove_mask.any():
+        return mesh
+    return _remove_vertices(mesh, ~remove_mask)
+
+
+@dataclass(slots=True)
 class BendComponent:
     """`suggest_bend_components()`가 반환하는 조각 하나 -- 사람이 고를 후보."""
 
@@ -182,6 +272,27 @@ class BendComponent:
     bbox_size: np.ndarray  # (dx, dy, dz)
     sphericity_score: float
     toe_score: float
+
+
+def pick_most_foot_like(
+    components: list[BendComponent],
+    *,
+    min_size_ratio: float = 0.3,
+) -> BendComponent:
+    """정점 수 1등을 무조건 고르는 대신, 발 모양 점수(구형성+발가락군집)로 뽑는다.
+
+    배경 조각(의자 다리 등)이 우연히 발보다 커지면 크기 기준 선택이 그걸
+    고르는 실패 사례가 있어(project_5류) 도입 -- `suggest_bend_components()`/
+    `suggest_neck_components()`가 이미 계산해두는 점수를 그제서야 쓴다.
+
+    너무 작은 조각이 우연히 점수만 높아 이기는 걸 막기 위해, 가장 큰 조각의
+    `min_size_ratio` 이상인 후보끼리만 경쟁시킨다.
+    """
+    if not components:
+        raise ValueError("components가 비어 있습니다")
+    largest_n = components[0].n_vertices
+    eligible = [c for c in components if c.n_vertices >= largest_n * min_size_ratio]
+    return max(eligible, key=lambda c: c.sphericity_score + c.toe_score)
 
 
 def suggest_bend_components(
@@ -200,6 +311,48 @@ def suggest_bend_components(
     tips = find_branch_tips(mesh, top_k=tip_top_k, min_separation_ratio=tip_min_separation_ratio)
     cuts = find_bend_cuts(mesh, tips, **bend_kwargs)
     cut_mesh = split_at_bends(mesh, tips, cuts)
+
+    pieces = cut_mesh.split(only_watertight=False)
+    if len(pieces) <= 1:
+        pieces = [mesh]
+
+    components: list[BendComponent] = []
+    for piece in pieces:
+        if len(piece.vertices) < min_component_vertices:
+            continue
+        pts = piece.vertices
+        components.append(BendComponent(
+            mesh=piece,
+            n_vertices=len(pts),
+            bbox_size=piece.bounds[1] - piece.bounds[0],
+            sphericity_score=_sphericity(pts),
+            toe_score=_toe_cluster_score(pts, pts.mean(axis=0)),
+        ))
+    components.sort(key=lambda c: c.n_vertices, reverse=True)
+    return components
+
+
+def suggest_neck_components(
+    mesh: trimesh.Trimesh,
+    *,
+    tip_top_k: int = 6,
+    tip_min_separation_ratio: float = 0.15,
+    min_component_vertices: int = 30,
+    ring_width_edge_mult: float = 10.0,
+    **neck_kwargs,
+) -> list[BendComponent]:
+    """`suggest_bend_components()`와 동일한 흐름이지만 꺾임각 대신 국소 단면
+    폭 골(`find_neck_cuts()`)로 자른다. `neck_kwargs`는 `find_neck_cuts()`로
+    전달.
+
+    `ring_width_edge_mult`(기본 10): 목 지점에서 지울 정점 띠 폭. 기본
+    (1.5, `split_at_bends()`와 동일)로는 목의 국소 엣지 길이가 불규칙한
+    경우 다리가 안 끊기는 걸 실측으로 확인(project_8aba7fd31e6c) -- 훨씬
+    넓게(10) 지워야 확실히 위상적으로 분리됨.
+    """
+    tips = find_branch_tips(mesh, top_k=tip_top_k, min_separation_ratio=tip_min_separation_ratio)
+    cuts = find_neck_cuts(mesh, tips, **neck_kwargs)
+    cut_mesh = split_at_necks(mesh, tips, cuts, ring_width_edge_mult=ring_width_edge_mult)
 
     pieces = cut_mesh.split(only_watertight=False)
     if len(pieces) <= 1:
