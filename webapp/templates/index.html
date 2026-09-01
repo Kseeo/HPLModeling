@@ -14,6 +14,12 @@
   button { background: #2d6cdf; color: #fff; border: none; padding: 8px 10px; border-radius: 6px; cursor: pointer; font-size: 13px; }
   button:disabled { background: #444; cursor: not-allowed; }
   .info { font-size: 12px; color: #9c9; white-space: pre-wrap; word-break: break-all; }
+  .hint { font-size: 11px; color: #777; }
+  .orient-grid { display: flex; gap: 8px; flex-wrap: wrap; margin: 4px 0; }
+  .orient-card { border: 2px solid #444; border-radius: 6px; padding: 4px; cursor: pointer; background: #222; width: 84px; text-align: center; }
+  .orient-card.chosen { border-color: #2d6cdf; background: #1a2c4d; }
+  .orient-card img { width: 76px; height: 76px; object-fit: contain; background: #000; border-radius: 4px; }
+  .orient-card .rank { font-size: 11px; color: #9c9; margin-top: 2px; }
   .err { font-size: 12px; color: #f66; white-space: pre-wrap; word-break: break-all; }
   .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
   input[type=text], input[type=number], select { background: #222; color: #eee; border: 1px solid #444; border-radius: 4px; padding: 6px; font-size: 12px; }
@@ -35,11 +41,18 @@
   <div class="stage">
     <h2>1단계: 크롭 + 발목 절단</h2>
     <details class="adv"><summary>옵션</summary>
-      <label>target_vertices <input type="number" id="s1_target_vertices" value="18119" style="width:80px"></label>
       <label><input type="checkbox" id="s1_trim_leg" checked> trim_leg</label>
       <label>reference_length_mm <input type="number" id="s1_ref_len" placeholder="(선택)" style="width:80px"></label><br>
-      <label><input type="checkbox" id="s1_two_pass"> 2-pass 재프레이밍 (배경이 씬 대부분을 차지하는 스캔용, 배경 적은 정상 스캔엔 끄고 쓸 것)</label>
+      <label><input type="checkbox" id="s1_two_pass"> 2-pass 재프레이밍 (배경이 씬 대부분을 차지하는 스캔용, 배경 적은 정상 스캔엔 끄고 쓸 것)</label><br>
+      <label><input type="checkbox" id="s1_prune_neck" checked> 목(neck) 파편 제거 (거리 기반으론 안 잡히는 가늘고 긴 파편 절단, 9샘플 검증됨)</label>
     </details>
+    <span class="hint">recover_holes/reject_color_outliers는 실전 검증 부족(회귀 위험 확인됨/성공사례 미확인)으로
+      화면에서 뺌 -- 필요하면 postprocess_pipeline.process_glb_to_foot()를 스크립트로 직접 호출.</span>
+    <div class="row">
+      <button id="runOrient" disabled>발바닥 방향 후보 보기</button>
+      <span class="hint">자동 1등이 가끔 틀려서(발이 옆으로 누움) 확실하지 않으면 눌러서 직접 고를 것.</span>
+    </div>
+    <div id="orientGrid" class="orient-grid" hidden></div>
     <button id="run1" disabled>1단계 실행</button>
     <model-viewer id="mv1" camera-controls auto-rotate></model-viewer>
     <div id="info1" class="info"></div>
@@ -70,7 +83,8 @@
         <input type="text" id="s3_train_path" placeholder="예: C:/Users/.../hplAI" style="width:220px">
       </label><br>
       <label>train_dataset_file <input type="text" id="s3_train_file" value="C3_bio.pt" style="width:120px"></label>
-      <label>target_faces <input type="number" id="s3_target_faces" placeholder="(선택)" style="width:80px"></label>
+      <label>target_faces <input type="number" id="s3_target_faces" value="36238" style="width:80px"></label>
+      <span class="hint">(축약은 여기서 함 -- Deep Bio-Graph 논문 해상도 기준 정점 ~18,119개 = 면 36,238개)</span>
       <label><input type="checkbox" id="s3_cpu"> CPU 강제</label>
     </details>
     <button id="run3" disabled>3단계 실행 (GNN)</button>
@@ -95,6 +109,8 @@
 
 <script>
 let jobId = null;
+let croppedFile = null;
+let chosenDirection = null;
 
 function setBusy(btn, busy, label) {
   btn.disabled = busy;
@@ -121,7 +137,7 @@ function showResult(stage, data) {
     (data.steps_applied ? `\n적용: ${data.steps_applied.join(", ")}` : "");
   document.getElementById(`info${stage}`).className = "info";
   const dl = document.getElementById(`dl${stage}`);
-  dl.href = url; dl.download = data.file; dl.style.display = "inline";
+  dl.href = `${url}?download=1`; dl.download = data.file; dl.style.display = "inline";
 }
 
 function showError(stage, err) {
@@ -139,8 +155,39 @@ document.getElementById("uploadBtn").onclick = async () => {
   const data = await res.json();
   if (!res.ok) return alert(data.error || "업로드 실패");
   jobId = data.job_id;
+  croppedFile = null;
+  chosenDirection = null;
+  document.getElementById("orientGrid").hidden = true;
+  document.getElementById("orientGrid").innerHTML = "";
   document.getElementById("uploadInfo").textContent = `job_id=${jobId} (${data.filename})`;
   document.getElementById("run1").disabled = false;
+  document.getElementById("runOrient").disabled = false;
+};
+
+document.getElementById("runOrient").onclick = async () => {
+  const btn = document.getElementById("runOrient");
+  setBusy(btn, true);
+  try {
+    const data = await postJSON(`/api/stage1_orientation/${jobId}`, {});
+    croppedFile = data.cropped_file;
+    chosenDirection = null;
+    const grid = document.getElementById("orientGrid");
+    grid.innerHTML = "";
+    grid.hidden = false;
+    data.candidates.forEach((c) => {
+      const card = document.createElement("div");
+      card.className = "orient-card";
+      card.innerHTML = `<img src="/jobs/${jobId}/${c.thumbnail}?t=${Date.now()}">` +
+        `<div class="rank">#${c.index + 1} (${c.score})</div>`;
+      card.onclick = () => {
+        chosenDirection = c.direction;
+        grid.querySelectorAll(".orient-card").forEach((el) => el.classList.remove("chosen"));
+        card.classList.add("chosen");
+      };
+      grid.appendChild(card);
+    });
+  } catch (err) { showError(1, err); }
+  setBusy(btn, false, "발바닥 방향 후보 보기");
 };
 
 document.getElementById("run1").onclick = async () => {
@@ -148,10 +195,12 @@ document.getElementById("run1").onclick = async () => {
   setBusy(btn, true);
   try {
     const data = await postJSON(`/api/stage1/${jobId}`, {
-      target_vertices: parseInt(document.getElementById("s1_target_vertices").value || "18119"),
       trim_leg: document.getElementById("s1_trim_leg").checked,
       reference_length_mm: parseFloat(document.getElementById("s1_ref_len").value) || null,
       two_pass: document.getElementById("s1_two_pass").checked,
+      prune_neck_fragments: document.getElementById("s1_prune_neck").checked,
+      cropped_file: croppedFile,
+      down_direction: chosenDirection,
     });
     showResult(1, data);
     document.getElementById("run2").disabled = false;

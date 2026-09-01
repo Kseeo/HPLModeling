@@ -1,11 +1,16 @@
 """로컬 웹 뷰어: GLB 업로드 -> 4단계 파이프라인 -> 각 단계 결과 GLB 저장/미리보기.
 
-  1단계: 발 검출(다중뷰 피부투표 크롭) + 정렬 + 발목 절단 + 해상도(target_vertices) 맞춤
-         (스무딩은 아직 안 함) -- process_glb_to_foot(postprocess=False)
+  1단계: 발 검출(다중뷰 피부투표 크롭) + 정렬 + 발목 절단 (스무딩·해상도 맞춤은 아직
+         안 함) -- process_glb_to_foot(postprocess=False, target_vertices=None)
   2단계: 1단계 결과에 스무딩(배경 파편/구멍 정리 + 사포질 + 고곡률 스무딩 + 마감 라플라시안)
          -- finishing.postprocess_mesh()
   3단계: hplAI GNN 추론(체크포인트로 하중 변형 예측) -- 별도 conda env(`mesh`)를
-         subprocess로 호출(build_dataset.py -> predict.py -> export_glb.py 그대로 재사용)
+         subprocess로 호출(build_dataset.py -> predict.py -> export_glb.py 그대로 재사용).
+         해상도(target_faces) 맞춤도 여기서 한다 -- build_dataset.py가 이미 이 시점
+         축약을 지원하고(`load_and_clean_glb`), floor_contact 라벨도 축약 전 정점
+         위치 기준 최근접 탐색으로 재매핑하도록 돼 있어 그대로 맞는다. 1단계에서
+         미리 축약해야 할 이유가 없어(오히려 1·2단계 결과물의 디테일만 깎임,
+         2026-09-01 확인) 여기로 옮김.
   4단계: GNN 결과 후처리 스무딩 + 바닥 재접지 -- finish_smooth_mesh() + rest_on_floor()
 
 1, 2, 4단계는 이 서버(foot_deform_engine .venv)와 같은 프로세스에서 바로 실행한다.
@@ -53,6 +58,10 @@ HPLAI_DIR = Path(r"C:/Users/cani0/OneDrive/바탕 화면/김서현/hplAI")
 GLB_PREPROCESS_DIR = HPLAI_DIR / "glb_preprocess"
 MESH_PYTHON = Path(r"C:/Users/cani0/miniconda3/envs/mesh/python.exe")
 CHECKPOINTS_DIR = HPLAI_DIR / "checkpoints_local"
+# Deep Bio-Graph 논문 해상도(정점 ~18,119) 기준 -- decimate_mesh()의 face_count
+# 관례(target_vertices*2)와 맞춤. 3단계(build_dataset.py)가 이 시점에 축약한다
+# (1단계에서 미리 축약하지 않음, 2026-09-01부터).
+DEFAULT_TARGET_FACES = 36238
 
 JOBS_DIR = Path(__file__).resolve().parent / "jobs"
 JOBS_DIR.mkdir(exist_ok=True)
@@ -61,6 +70,7 @@ from foot_engine.sfm.dense import find_floor_contact_mask, rest_on_floor  # noqa
 from foot_engine.stl_foot_extract.finishing import finish_smooth_mesh, postprocess_mesh  # noqa: E402
 
 STAGE1_WORKER = Path(__file__).resolve().parent / "stage1_worker.py"
+STAGE1_ORIENTATION_WORKER = Path(__file__).resolve().parent / "stage1_orientation_worker.py"
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 512 * 1024 * 1024  # 512MB
@@ -102,6 +112,45 @@ def api_upload():
     return jsonify(job_id=job_id, filename=input_path.name)
 
 
+@app.route("/api/stage1_orientation/<job_id>", methods=["POST"])
+def api_stage1_orientation(job_id):
+    """발바닥 방향 후보를 뽑아 미리보기 이미지로 저장(픽커용).
+
+    발이 옆으로 누운 채 정렬되는 사례(자동 1등과 2등의 접점수 차이가 좁을 때
+    1등이 틀리는 경우, 실측: job 985651d7c759)를 위해, 크롭 결과에서 상위
+    후보 몇 개를 골라 미리보기를 보여주고 사용자가 고르게 한다. 크롭 자체는
+    한 번만(여기서) 하고 파일로 캐싱 -- `/api/stage1`에서 `cropped_file`로
+    넘기면 재크롭 없이 이어서 정렬만 다시 한다.
+    """
+    try:
+        d = job_dir(job_id)
+        inputs = list(d.glob("0_input.*"))
+        if not inputs:
+            return jsonify(error="0단계(업로드) 결과가 없습니다"), 400
+
+        out_cropped = d / "1a_cropped.glb"
+        result_json = d / "1a_orientation_result.json"
+        cmd = [
+            sys.executable, str(STAGE1_ORIENTATION_WORKER),
+            "--input", str(inputs[0]), "--output_cropped", str(out_cropped),
+            "--job_dir", str(d), "--result_json", str(result_json),
+        ]
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600,
+        )
+        log = f"$ {' '.join(cmd)}\n{proc.stdout}\n{proc.stderr}"
+        if proc.returncode != 0 or not result_json.exists():
+            return jsonify(error="방향 후보 워커가 실패했습니다(렌더링 크래시 가능성)", log=log), 500
+
+        info = json.loads(result_json.read_text(encoding="utf-8"))
+        return jsonify(**info)
+    except subprocess.TimeoutExpired:
+        return jsonify(error="방향 후보 계산 시간 초과(10분)"), 500
+    except Exception as e:  # noqa: BLE001
+        traceback.print_exc()
+        return jsonify(error=str(e)), 500
+
+
 @app.route("/api/stage1/<job_id>", methods=["POST"])
 def api_stage1(job_id):
     """크롭 + 정렬 + 발목 절단 + 해상도 맞춤 (스무딩 전).
@@ -119,23 +168,36 @@ def api_stage1(job_id):
             return jsonify(error="0단계(업로드) 결과가 없습니다"), 400
 
         args = request.get_json(silent=True) or {}
-        target_vertices = int(args.get("target_vertices", 18119))
         trim_leg = bool(args.get("trim_leg", True))
         reference_length_mm = args.get("reference_length_mm")
         two_pass = bool(args.get("two_pass", False))
+        prune_neck_fragments = bool(args.get("prune_neck_fragments", True))
+        recover_holes = bool(args.get("recover_holes", False))
+        reject_color_outliers = bool(args.get("reject_color_outliers", False))
+        down_direction = args.get("down_direction")  # [x,y,z] -- 방향 후보 픽커에서 고른 값
+        cropped_file = args.get("cropped_file")  # 방향 후보 픽커가 캐싱해둔 크롭 결과 파일명
 
         out_path = d / "1_crop_ankle.glb"
         result_json = d / "1_crop_ankle_result.json"
         cmd = [
             sys.executable, str(STAGE1_WORKER),
             "--input", str(inputs[0]), "--output", str(out_path),
-            "--target_vertices", str(target_vertices),
             "--trim_leg", "1" if trim_leg else "0",
             "--two_pass", "1" if two_pass else "0",
+            "--prune_neck_fragments", "1" if prune_neck_fragments else "0",
+            "--recover_holes", "1" if recover_holes else "0",
+            "--reject_color_outliers", "1" if reject_color_outliers else "0",
             "--result_json", str(result_json),
         ]
         if reference_length_mm:
             cmd += ["--reference_length_mm", str(float(reference_length_mm))]
+        if cropped_file:
+            cmd += ["--cropped_input", str(d / cropped_file)]
+        if down_direction:
+            # 음수 성분이 있으면 argparse가 "--down_direction" "-0.9,..." 두 토큰을
+            # 옵션+값으로 못 묶고 "-0.9..."를 새 옵션으로 오인해 깨진다(실측 확인) --
+            # "--opt=value" 한 토큰으로 넘겨야 안전.
+            cmd += ["--down_direction=" + ",".join(str(float(v)) for v in down_direction)]
 
         proc = subprocess.run(
             cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600,
@@ -216,7 +278,7 @@ def api_stage3(job_id):
         checkpoint = args.get("checkpoint")
         train_dataset_path = args.get("train_dataset_path")
         train_dataset_file = args.get("train_dataset_file") or "C3_bio.pt"
-        target_faces = args.get("target_faces") or None
+        target_faces = args.get("target_faces") or DEFAULT_TARGET_FACES
         use_cpu = bool(args.get("cpu", False))
         if not checkpoint:
             return jsonify(error="checkpoint를 선택하세요"), 400
@@ -326,7 +388,12 @@ def api_stage4(job_id):
 
 @app.route("/jobs/<job_id>/<path:filename>")
 def serve_job_file(job_id, filename):
-    return send_from_directory(job_dir(job_id), filename)
+    # model-viewer 미리보기는 inline(기본값)으로 그냥 로드해야 하지만, 다운로드
+    # 링크는 <a download>만으로는 브라우저마다 강제 저장이 안 먹는 경우가 있어
+    # (Content-Disposition: inline이 우선되는 사례 확인) ?download=1이면
+    # attachment로 명시해 확실히 저장 다이얼로그가 뜨게 한다.
+    as_attachment = request.args.get("download") == "1"
+    return send_from_directory(job_dir(job_id), filename, as_attachment=as_attachment)
 
 
 if __name__ == "__main__":

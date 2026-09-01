@@ -21,6 +21,7 @@ import scipy.sparse as sp
 import scipy.sparse.csgraph as csg
 import trimesh
 from scipy.spatial import cKDTree
+from sklearn.cluster import KMeans
 
 from foot_engine.sfm.masking import load_skin_segmenter, skin_only_mask
 
@@ -149,6 +150,14 @@ def _close_gaps(points: np.ndarray, mask: np.ndarray, *, radius_mult: float = 15
     번도 피부로 안 잡힘)을 남기는데, `finishing.fill_small_holes()`는 메쉬
     경계 루프 기준이라 이런 넓은 미관측 영역은 못 메운다. 팽창-침식은 경계는
     거의 그대로 두면서 팽창 반경보다 좁은 구멍만 골라 메운다.
+
+    "반경 이내에 반대쪽 점이 있는가"를 최근접 1점 거리로 판정한다(수학적으로
+    `query_ball_point`로 반경 안 전체 이웃을 모아 판정하는 것과 동일) --
+    이전엔 이웃 목록 전체를 모아 파이썬 루프로 판정해 큰 반경(기본 25배
+    간격)에서 반경 안 점 개수에 비례해 느려졌다(project 175d98a727c1
+    실측: 53.7초 중 31.9초, 전체의 60%). 최근접 거리 판정은 반경 안 점이
+    몇 개든 트리 탐색 1회로 끝나 반경 크기와 거의 무관하다(같은 입력 32초
+    -> 0.1초 미만으로 확인).
     """
     tree = cKDTree(points)
     radius = _typical_spacing(points, tree) * radius_mult
@@ -156,15 +165,21 @@ def _close_gaps(points: np.ndarray, mask: np.ndarray, *, radius_mult: float = 15
     fg_idx = np.where(mask)[0]
     if len(fg_idx) == 0:
         return mask
-    dilated = mask.copy()
-    for idxs in tree.query_ball_point(points[fg_idx], radius):
-        dilated[idxs] = True
+
+    fg_tree = cKDTree(points[fg_idx])
+    dist_to_fg, _ = fg_tree.query(points, k=1, workers=-1)
+    dilated = mask | (dist_to_fg <= radius)
+
+    bg_idx = np.where(~dilated)[0]
+    if len(bg_idx) == 0:
+        return dilated  # 배경이 하나도 안 남았으면 침식 대상 없음(원본과 동일 동작)
+
+    bg_tree = cKDTree(points[bg_idx])
+    dilated_idx = np.where(dilated)[0]
+    dist_to_bg, _ = bg_tree.query(points[dilated_idx], k=1, workers=-1)
 
     eroded = dilated.copy()
-    dilated_idx = np.where(dilated)[0]
-    for i, idxs in zip(dilated_idx, tree.query_ball_point(points[dilated_idx], radius)):
-        if not dilated[idxs].all():
-            eroded[i] = False
+    eroded[dilated_idx[dist_to_bg <= radius]] = False
     return eroded
 
 
@@ -323,6 +338,89 @@ def _coarse_reframe(
     return reframed
 
 
+def _reject_color_material_outliers(
+    mesh: trimesh.Trimesh,
+    mask: np.ndarray,
+    frac: np.ndarray,
+    *,
+    min_boundary_crease_ratio: float = 1.3,
+    min_cluster_ratio: float = 0.05,
+    min_frac_margin: float = 0.05,
+) -> np.ndarray:
+    """채택 영역을 색상 2-클러스터링해 소재가 다른 조각(의자 등)을 걸러낸다.
+
+    사람이 이런 오염을 눈으로 잡아내는 근거는 색뿐 아니라 "거기서 표면이
+    꺾인다(다른 물체가 맞닿은 이음매)"는 신호도 같이 본다 -- 색 분리만으로는
+    발 자체의 음영차(빛 받는 발등 vs 그늘진 옆면)도 똑같이 갈라져서 못 쓴다
+    (실측: project_228/230도 색분리도 0.55 안팎으로 오염된 project_5와
+    구분 안 됨). 그래서 색 경계의 이면각(dihedral angle) 중앙값이 메쉬
+    전체 전형값보다 확실히 꺾여있을 때만(`min_boundary_crease_ratio`배 이상)
+    이음매로 인정한다(실측: project_5 경계/전체 1.48배 vs 정상 샘플 두 개
+    1.07~1.12배 -- 뚜렷하게 갈림).
+
+    진짜 이음매로 판정되면 두 클러스터 중 `multiview_skin_vote()`의 원래
+    피부투표 frac 평균이 더 높은 쪽을 발로 보고 남긴다(발 모양 점수로
+    골랐다가 project_5에서 점수차 0.02 수준의 노이즈로 반대쪽을 고르는
+    실패를 실측으로 확인해 교체) -- frac 평균 차이가 `min_frac_margin`
+    미만이면(둘 다 똑같이 애매해 신뢰 불가) 아예 건드리지 않는다. project_5
+    자체는 이 마진 조건에 걸려 그냥 통과할 가능성이 높음(별도로 확인된 텍스처
+    색편향 때문에 분류 신뢰도가 전체적으로 낮아 어느 쪽도 확신을 못 줌) --
+    이 옵션은 분류기 신뢰도가 정상 범위인 스캔에서의 이음매용.
+    """
+    idx = np.where(mask)[0]
+    if len(idx) < 50:
+        return mask
+    try:
+        colors = mesh.visual.to_color().vertex_colors[idx][:, :3].astype(np.float64) / 255.0
+    except Exception:
+        return mask  # 색 정보 없음 -- 판정 불가, 안 건드림
+
+    labels = KMeans(n_clusters=2, n_init=10, random_state=0).fit(colors).labels_
+    counts = np.bincount(labels, minlength=2)
+    if counts.min() / len(labels) < min_cluster_ratio:
+        return mask  # 한쪽이 너무 작으면 노이즈로 보고 안 건드림
+
+    vertex_label = np.full(len(mesh.vertices), -1, dtype=np.int8)
+    vertex_label[idx] = labels
+
+    face_mask = mask[mesh.faces].all(axis=1)
+    face_idx = np.where(face_mask)[0]
+    if len(face_idx) == 0:
+        return mask
+    face_vote = vertex_label[mesh.faces[face_idx]].sum(axis=1)
+    face_label = np.full(len(mesh.faces), -1, dtype=np.int8)
+    face_label[face_idx] = (face_vote >= 2).astype(np.int8)  # 3정점 중 다수결
+
+    fa = mesh.face_adjacency
+    angles = np.degrees(mesh.face_adjacency_angles)
+    both_in = (face_label[fa[:, 0]] >= 0) & (face_label[fa[:, 1]] >= 0)
+    if not both_in.any():
+        return mask
+    overall_med = float(np.median(angles[both_in]))
+    is_boundary = both_in & (face_label[fa[:, 0]] != face_label[fa[:, 1]])
+    if not is_boundary.any() or overall_med < 1e-6:
+        return mask
+    boundary_med = float(np.median(angles[is_boundary]))
+    if boundary_med < min_boundary_crease_ratio * overall_med:
+        return mask  # 경계가 전형적 곡률보다 안 꺾여있음 -- 음영차로 보고 안 건드림
+
+    frac0 = float(frac[idx[labels == 0]].mean())
+    frac1 = float(frac[idx[labels == 1]].mean())
+    if abs(frac0 - frac1) < min_frac_margin:
+        return mask  # 어느 쪽이 발인지 신뢰할 만큼 갈리지 않음 -- 안 건드림
+    keep_label = 0 if frac0 >= frac1 else 1
+
+    new_mask = mask.copy()
+    new_mask[idx[labels != keep_label]] = False
+    print(
+        f"[texture_crop] 색+이면각 이음매 감지: 경계 {boundary_med:.1f}도"
+        f"(전체 {overall_med:.1f}도의 {boundary_med / overall_med:.2f}배), "
+        f"피부투표 frac {max(frac0, frac1):.2f} vs {min(frac0, frac1):.2f} -- "
+        f"소재가 다른 조각 정점 {int(counts[1 - keep_label]):,}개 제외"
+    )
+    return new_mask
+
+
 @dataclass(slots=True)
 class TextureCropResult:
     """`extract_by_skin_vote()`의 산출물."""
@@ -351,6 +449,9 @@ def extract_by_skin_vote(
     recover_min_circularity: float = 0.35,
     recover_max_diag_ratio: float = 0.3,
     recover_radius_mult: float = 2.0,
+    reject_color_outliers: bool = False,
+    reject_min_boundary_crease_ratio: float = 1.3,
+    reject_min_cluster_ratio: float = 0.05,
 ) -> TextureCropResult:
     """`multiview_skin_vote()` + 빈틈 닫힘 + 공간 클러스터링 + UV 이음매 용접까지 엮은 진입점.
 
@@ -404,6 +505,18 @@ def extract_by_skin_vote(
             켜고 반드시 렌더로 확인할 것.
         recover_min_circularity / recover_max_diag_ratio / recover_radius_mult:
             `_recover_holes_from_original()`로 그대로 전달.
+        reject_color_outliers: 켜면 최종 채택 영역을 색상 2-클러스터링해,
+            색 경계가 메쉬 전형적 곡률보다 확실히 꺾여있는(실제 이음매로
+            보이는) 경우에만 발 모양 점수가 낮은 쪽을 제외한다
+            (`_reject_color_material_outliers()` 참고) -- 의자 등 소재가
+            다른 배경 조각이 발과 공간적으로 붙어 위상/거리 기반 정리로는
+            안 갈라지는 케이스에 유효할 수 있음(실측: project_5에서 색+
+            이면각 신호가 뚜렷하게 갈림 확인). 다만 정점 색이 없는 입력이나
+            클러스터링이 실패하는 경우엔 조용히 원본을 그대로 반환(안전
+            폴백)하고, 아직 실전 케이스로 최종 확인된 옵션은 아니라 기본
+            꺼짐 -- 켜서 쓸 때 결과를 반드시 렌더로 확인할 것.
+        reject_min_boundary_crease_ratio / reject_min_cluster_ratio:
+            `_reject_color_material_outliers()`로 그대로 전달.
     """
     if two_pass:
         mesh = _coarse_reframe(
@@ -433,6 +546,11 @@ def extract_by_skin_vote(
         final_mask = _recover_holes_from_original(
             mesh, final_mask, min_circularity=recover_min_circularity,
             max_diag_ratio=recover_max_diag_ratio, recover_radius_mult=recover_radius_mult,
+        )
+    if reject_color_outliers:
+        final_mask = _reject_color_material_outliers(
+            mesh, final_mask, frac, min_boundary_crease_ratio=reject_min_boundary_crease_ratio,
+            min_cluster_ratio=reject_min_cluster_ratio,
         )
     cropped = _remove_vertices(mesh, final_mask)
     welded = _weld_uv_seams(cropped)

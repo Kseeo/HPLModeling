@@ -26,30 +26,60 @@ if hasattr(sys.stderr, "reconfigure"):
         pass
 sys.stdout = sys.stderr  # process_glb_to_foot()의 print()들이 stdout JSON을 오염시키지 않도록
 
-from foot_engine.stl_foot_extract.postprocess_pipeline import export_result, process_glb_to_foot  # noqa: E402
+import trimesh  # noqa: E402
+
+from foot_engine.stl_foot_extract.postprocess_pipeline import (  # noqa: E402
+    crop_foot_mesh,
+    export_result,
+    finish_foot_mesh,
+)
 
 
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--input", required=True)
     p.add_argument("--output", required=True)
-    p.add_argument("--target_vertices", type=int, default=18119)
     p.add_argument("--trim_leg", type=int, default=1)
     p.add_argument("--reference_length_mm", type=float, default=None)
     p.add_argument("--two_pass", type=int, default=0)
+    p.add_argument("--prune_neck_fragments", type=int, default=1)
+    p.add_argument("--recover_holes", type=int, default=0)
+    p.add_argument("--reject_color_outliers", type=int, default=0)
+    # 방향 후보 픽커(stage1_orientation_worker.py)가 이미 크롭해둔 결과가 있으면
+    # 그걸 재사용하고(다중뷰 렌더링 재실행 안 함), 사용자가 고른 방향으로 정렬한다.
+    p.add_argument("--cropped_input", default=None)
+    p.add_argument("--down_direction", default=None, help="'x,y,z' 콤마 구분")
     p.add_argument("--result_json", required=True)
     args = p.parse_args()
 
-    result = process_glb_to_foot(
-        args.input,
+    down_direction = None
+    if args.down_direction:
+        down_direction = [float(v) for v in args.down_direction.split(",")]
+
+    if args.cropped_input:
+        cropped_mesh = trimesh.load(args.cropped_input, force="mesh", process=False)
+        n_input = len(cropped_mesh.vertices)
+    else:
+        cropped_mesh, n_input = crop_foot_mesh(
+            args.input, two_pass=bool(args.two_pass),
+            recover_holes=bool(args.recover_holes),
+            reject_color_outliers=bool(args.reject_color_outliers),
+        )
+
+    result = finish_foot_mesh(
+        cropped_mesh,
+        n_input_vertices=n_input,
         postprocess=False,
         align=True,
         trim_leg=bool(args.trim_leg),
-        target_vertices=args.target_vertices,
+        # target_vertices는 넘기지 않는다(축약 안 함) -- 해상도 맞춤은 3단계
+        # (build_dataset.py --target_faces)에서 한다. 1단계에서 미리 축약해야
+        # 할 이유가 없고, 오히려 1·2단계 산출물의 디테일만 깎였다(2026-09-01).
         reference_length_mm=args.reference_length_mm,
         floor_contact_tolerance_mm=2.0,
         z_up=False,
-        two_pass=bool(args.two_pass),
+        down_direction=down_direction,
+        prune_neck_fragments=bool(args.prune_neck_fragments),
     )
     out_path = Path(args.output)
     export_result(result, out_path)
