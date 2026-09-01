@@ -25,3 +25,12 @@ data/
 # 에디터/OS 잡파일
 .DS_Store
 Thumbs.db
+
+# PyInstaller exe 빌드 산출물 -- webapp/launcher.py 등 소스로부터 커맨드 한 번이면
+# 다시 만들 수 있고(용량도 수 GB) 커밋할 이유가 없다.
+build/
+dist/
+*.spec
+
+# 웹앱 실행 로그 -- 매 요청마다 계속 늘어나는 런타임 로그라 추적하지 않는다.
+webapp/server.log

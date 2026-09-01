@@ -43,7 +43,10 @@ def main() -> int:
     p.add_argument("--input", required=True)
     p.add_argument("--output_cropped", required=True)
     p.add_argument("--job_dir", required=True)
-    p.add_argument("--k", type=int, default=5)
+    # 10개를 한 번에 뽑아둔다(웹앱은 처음엔 5개만 보여주고 "더 보기"로 재크롭
+    # 없이 나머지를 마저 보여줌) -- 크롭(다중뷰 렌더링, ~20초)은 한 번만 하고
+    # 후보 계산+썸네일 렌더만 늘어나는 거라 비용이 적다.
+    p.add_argument("--k", type=int, default=10)
     p.add_argument("--result_json", required=True)
     args = p.parse_args()
 

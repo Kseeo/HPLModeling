@@ -133,23 +133,58 @@ def prune_thin_protrusions(
     return pruned, n_removed
 
 
+def _fill_holes_centroid_fan(
+    mesh: trimesh.Trimesh, holes: list[list[int]], boundary: np.ndarray,
+) -> trimesh.Trimesh:
+    """구멍마다 새 중심점 정점을 하나씩 추가하고 그 중심에서 부채꼴로 채운다.
+
+    `trimesh.geometry.triangulate_quads(use_fan=True)`(귀퉁이-팬)는 구멍이
+    볼록하지 않으면 삼각형이 서로 가로질러 찌그러진다(trimesh 자체 docstring
+    경고, project_5 실측으로 확인: 비볼록 구멍을 메웠더니 구겨진 패치가 됨).
+    중심점 기반 팬은 모든 삼각형이 중심 한 점을 공유해 볼록/비볼록과 무관하게
+    안정적이다. `stl_foot_extract/finishing.py`의 같은 이름 함수와 중복
+    (모듈 docstring 참고) -- 로직 바꿀 땐 두 곳 다 확인할 것.
+    """
+    n_existing = len(mesh.vertices)
+    new_vertices: list[np.ndarray] = []
+    new_faces: list[list[int]] = []
+    for loop in holes:
+        centroid = mesh.vertices[loop].mean(axis=0)
+        center_idx = n_existing + len(new_vertices)
+        new_vertices.append(centroid)
+        n = len(loop)
+        for i in range(n):
+            a, b = loop[i], loop[(i + 1) % n]
+            new_faces.append([center_idx, a, b])
+    if not new_faces:
+        return mesh
+
+    new_faces_arr = np.array(new_faces, dtype=np.int64)
+    new_edges = trimesh.geometry.faces_to_edges(new_faces_arr)
+    hashable_new = trimesh.grouping.hashable_rows(new_edges)
+    hashable_old = trimesh.grouping.hashable_rows(boundary)
+    needs_reverse = np.isin(hashable_new, hashable_old).reshape((-1, 3)).any(axis=1)
+    new_faces_arr[needs_reverse] = np.fliplr(new_faces_arr[needs_reverse])
+
+    out = mesh.copy()
+    out.vertices = np.vstack([out.vertices, np.array(new_vertices)])
+    out.faces = np.vstack([out.faces, new_faces_arr])
+    return out
+
+
 def fill_small_holes(
     mesh: trimesh.Trimesh,
     *,
     max_hole_diameter_ratio: float = 0.05,
-    use_fan: bool = True,
 ) -> tuple[trimesh.Trimesh, int]:
-    """작은 구멍(핀홀/관측 누락 조각)만 팬 삼각분할로 메운다.
+    """작은 구멍(핀홀/관측 누락 조각)만 중심점-팬으로 메운다.
 
     - 발바닥처럼 원래 안 찍은 큰 구멍은 그대로 둠(억지로 메우면 가짜
       뚜껑이 씌워져 형태 왜곡). 구멍 바운딩박스 대각선이 메쉬 전체 대각선의
       max_hole_diameter_ratio보다 작을 때만 메움.
-    - trimesh.repair.fill_holes()와 같은 방식(경계 사이클+팬 삼각분할)이나
-      크기 필터가 추가된 버전. 삼각형 추가만, 기존 정점/면은 그대로.
 
     Args:
         max_hole_diameter_ratio: 구멍 대각선/메쉬 전체 대각선 비율 상한(기본 5%).
-        use_fan: 볼록하지 않은 구멍도 팬 삼각분할로 메울지.
 
     Returns:
         (구멍 메운 메쉬, 실제로 메운 구멍 개수).
@@ -177,19 +212,7 @@ def fill_small_holes(
     if not small_holes:
         return mesh, 0
 
-    new_faces = trimesh.geometry.triangulate_quads(small_holes, use_fan=use_fan)
-    if len(new_faces) == 0:
-        return mesh, 0
-
-    # winding 보정 -- 새 face 경계 edge가 기존 경계와 같은 방향이면 뒤집는다.
-    new_edges = trimesh.geometry.faces_to_edges(new_faces)
-    hashable_new = trimesh.grouping.hashable_rows(new_edges)
-    hashable_old = trimesh.grouping.hashable_rows(boundary)
-    needs_reverse = np.isin(hashable_new, hashable_old).reshape((-1, 3)).any(axis=1)
-    new_faces[needs_reverse] = np.fliplr(new_faces[needs_reverse])
-
-    out = mesh.copy()
-    out.extend_faces(new_faces)
+    out = _fill_holes_centroid_fan(mesh, small_holes, boundary)
     return out, len(small_holes)
 
 

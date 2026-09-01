@@ -17,6 +17,7 @@ Selfie Multiclass가 맡는다.
 
 from __future__ import annotations
 
+import sys
 import urllib.request
 from pathlib import Path
 
@@ -34,9 +35,20 @@ SELFIE_MULTICLASS_URL = (
     "https://storage.googleapis.com/mediapipe-models/image_segmenter/"
     "selfie_multiclass_256x256/float32/latest/selfie_multiclass_256x256.tflite"
 )
-DEFAULT_SKIN_MODEL_PATH = (
-    Path(__file__).resolve().parents[3] / "data" / "models" / "selfie_multiclass_256x256.tflite"
-)
+def _default_skin_model_path() -> Path:
+    """PyInstaller로 얼린(frozen) 상태에서도 모델 파일을 찾는다.
+
+    평소엔 소스 트리 기준(`parents[3]`)이지만, 얼린 exe에서는 그 경로가
+    깨진다 -- PyInstaller가 번들 데이터 파일을 실제로 푸는 위치는
+    `sys._MEIPASS`다(onedir는 `_internal/`, onefile은 임시 추출 폴더 --
+    `sys.executable`의 부모 폴더가 아님, 실측으로 확인).
+    """
+    if getattr(sys, "frozen", False):
+        return Path(sys._MEIPASS) / "data" / "models" / "selfie_multiclass_256x256.tflite"  # type: ignore[attr-defined]
+    return Path(__file__).resolve().parents[3] / "data" / "models" / "selfie_multiclass_256x256.tflite"
+
+
+DEFAULT_SKIN_MODEL_PATH = _default_skin_model_path()
 
 
 def load_skin_segmenter(model_path: Path = DEFAULT_SKIN_MODEL_PATH):

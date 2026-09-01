@@ -912,6 +912,25 @@ def trim_leg_above_ankle(mesh: trimesh.Trimesh, **kwargs) -> trimesh.Trimesh:
     return trimmed
 
 
+def cut_at_height(mesh: trimesh.Trimesh, y: float) -> trimesh.Trimesh:
+    """align_sole_down() 직후(Y=높이축) 호출 전제 -- 폭곡선 추정 없이 Y=y에서
+    그냥 수평으로 자른다(사람이 3D로 보고 위치를 직접 고르는 UI용).
+
+    `trim_leg_above_ankle()`의 자동 반등 탐지가 노이즈 많은 스캔에서 엉뚱한
+    높이를 골라 뒤꿈치까지 잘려나가는 사례가 반복 확인돼(project_5) 만든
+    수동 대안 -- 판정 로직 없이 그대로 자르기만 한다.
+    """
+    trimmed = mesh.slice_plane([0.0, y, 0.0], [0.0, -1.0, 0.0], cap=True)
+    if trimmed is None or len(trimmed.vertices) == 0:
+        print("[cut] 절단 결과가 비어 원본을 유지합니다")
+        return mesh
+    trimmed, faces_before, faces_after = keep_largest_component(trimmed)
+    if faces_after < faces_before:
+        print(f"[cut] 절단 후 부유 조각 제거: 면 {faces_before:,} -> {faces_after:,}")
+    print(f"[cut] Y={y:.4g}에서 절단 (정점 {len(mesh.vertices):,} -> {len(trimmed.vertices):,})")
+    return trimmed
+
+
 def rest_on_floor(
     mesh: trimesh.Trimesh,
     *,
@@ -1027,6 +1046,7 @@ def finalize_mesh(
     prune_far_fragments_enabled: bool = True,
     decimate_smooth_after: bool = True,
     down_direction: np.ndarray | None = None,
+    trim_leg_kwargs: dict | None = None,
 ) -> tuple[trimesh.Trimesh, float]:
     """run_dense_pipeline()이 만든 원본 메쉬를 축 정렬+스케일링+바닥 정착까지
     마친 최종 메쉬로 만든다. run_pipeline()과 run_dense_pipeline.py가 공유.
@@ -1048,6 +1068,14 @@ def finalize_mesh(
       준 후보(이 함수가 내부적으로 거치는 것과 같은 전처리 기준)를 그대로
       넣을 것 -- 다른 전처리를 거친 메쉬에서 뽑은 방향을 넣으면 좌표계가
       어긋난다.
+    - trim_leg_kwargs: `trim_leg_above_ankle()`/`find_ankle_cut_height()`로
+      그대로 전달. 폭 곡선이 노이즈투성이인 스캔에서는 반등 탐지 자체가
+      엉뚱한 높이를 "다리"로 오판해 발 뒤꿈치까지 잘려나가는 사례 확인
+      (project_5 실측: Y=0.012에서 32% 유실). `rebound_ratio`를 크게 주면
+      (예: 999) 반등 탐지를 사실상 끄고 고정 비율(`max_length_ratio`)
+      절단으로만 동작 -- 접지가 이미 확실한 스캔에서는 이쪽이 더 안전할 수
+      있음(실측: 뒤꿈치 보존 확인). 기본 파라미터는 안 건드림(정상 스캔은
+      반등 탐지가 더 정확한 절단선을 찾음, project_230 등에서 확인).
     - Returns: (정렬/스케일/접지 완료된 메쉬, 적용된 스케일 배율)
     """
     mesh, faces_before, faces_after = keep_largest_component(mesh)
@@ -1056,7 +1084,7 @@ def finalize_mesh(
 
     mesh = align_sole_down(mesh, down_direction=down_direction)
     if trim_leg:
-        mesh = trim_leg_above_ankle(mesh)
+        mesh = trim_leg_above_ankle(mesh, **(trim_leg_kwargs or {}))
     if prune_far_fragments_enabled:
         mesh = prune_far_fragments(mesh)
 

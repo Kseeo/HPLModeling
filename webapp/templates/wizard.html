@@ -1,0 +1,532 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>발 추출 마법사</title>
+<style>
+  :root {
+    --bg: #101211;
+    --panel: #171a19;
+    --border: #2b302e;
+    --ink: #ecf1ef;
+    --ink-muted: #8fa39c;
+    --accent: #35b58c;
+    --accent-dim: #1c3a30;
+    --danger: #e2685a;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; background: var(--bg); color: var(--ink);
+    font-family: -apple-system, "Malgun Gothic", sans-serif;
+    display: flex; flex-direction: column;
+  }
+
+  header.top {
+    display: flex; align-items: center; justify-content: center;
+    padding: 20px 16px 8px;
+  }
+  .steps { display: flex; gap: 28px; }
+  .step-dot {
+    display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--ink-muted);
+  }
+  .step-dot .n {
+    width: 26px; height: 26px; border-radius: 50%; border: 1.5px solid var(--border);
+    display: flex; align-items: center; justify-content: center; font-weight: 600; font-size: 12px;
+  }
+  .step-dot.active { color: var(--ink); }
+  .step-dot.active .n { border-color: var(--accent); background: var(--accent-dim); color: var(--accent); }
+  .step-dot.done .n { border-color: var(--accent); background: var(--accent); color: #06120d; }
+
+  main { flex: 1; display: flex; align-items: center; justify-content: center; padding: 24px; }
+  .panel {
+    width: min(760px, 94vw); background: var(--panel); border: 1px solid var(--border);
+    border-radius: 16px; padding: 40px; display: flex; flex-direction: column; align-items: center;
+    gap: 20px; text-align: center;
+  }
+  .panel[hidden] { display: none; }
+  .panel h1 { font-size: 22px; margin: 0; }
+  .panel p.sub { color: var(--ink-muted); font-size: 14px; margin: -8px 0 4px; max-width: 52ch; }
+
+  /* 1: 업로드 */
+  .dropzone {
+    width: 100%; min-height: 220px; border: 2px dashed var(--border); border-radius: 12px;
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px;
+    cursor: pointer; transition: border-color .15s, background .15s;
+  }
+  .dropzone.drag { border-color: var(--accent); background: var(--accent-dim); }
+  .dropzone .icon { font-size: 40px; opacity: .6; }
+  .dropzone .fname { color: var(--accent); font-size: 14px; }
+
+  /* 2: 방향 후보 캐러셀 */
+  .carousel { display: flex; align-items: center; gap: 18px; width: 100%; justify-content: center; }
+  .carousel button.arrow {
+    width: 44px; height: 44px; border-radius: 50%; border: 1px solid var(--border);
+    background: var(--panel); color: var(--ink); font-size: 18px; cursor: pointer; flex-shrink: 0;
+  }
+  .carousel button.arrow:disabled { opacity: .3; cursor: not-allowed; }
+  .carousel button.arrow:not(:disabled):hover { border-color: var(--accent); color: var(--accent); }
+  .cand-frame {
+    width: 340px; height: 340px; border-radius: 12px; overflow: hidden; background: #000;
+    border: 1px solid var(--border); position: relative;
+  }
+  .cand-frame img { width: 100%; height: 100%; object-fit: contain; }
+  .cand-score {
+    position: absolute; bottom: 8px; right: 10px; font-size: 12px; color: var(--ink-muted);
+    background: rgba(0,0,0,.5); padding: 2px 8px; border-radius: 10px;
+  }
+  .dots { display: flex; gap: 7px; }
+  .dots .d { width: 7px; height: 7px; border-radius: 50%; background: var(--border); }
+  .dots .d.on { background: var(--accent); }
+
+  /* 3: 절단 */
+  #cutViewport {
+    width: 100%; height: 420px; border-radius: 12px; overflow: hidden; background: #05100c;
+    border: 1px solid var(--border);
+  }
+  .cut-controls { width: 100%; display: flex; flex-direction: column; gap: 8px; }
+  .cut-controls input[type=range] { width: 100%; accent-color: var(--accent); }
+  .cut-hint { font-size: 12px; color: var(--ink-muted); }
+  .tilt-adv { width: 100%; text-align: left; }
+  .tilt-adv summary { font-size: 13px; color: var(--ink-muted); cursor: pointer; padding: 4px 0; }
+  .tilt-adv summary:hover { color: var(--ink); }
+  .tilt-adv label { font-size: 12px; color: var(--ink-muted); display: block; margin-top: 8px; }
+
+  /* 4: 완료 */
+  model-viewer { width: 100%; height: 340px; background: #000; border-radius: 12px; }
+
+  .actions { display: flex; gap: 10px; margin-top: 4px; flex-wrap: wrap; justify-content: center; }
+  button.primary {
+    background: var(--accent); color: #06120d; border: none; padding: 12px 26px;
+    border-radius: 9px; font-size: 15px; font-weight: 700; cursor: pointer;
+  }
+  button.primary:disabled { background: #294238; color: #5c6d65; cursor: not-allowed; }
+  button.secondary {
+    background: transparent; color: var(--ink-muted); border: 1px solid var(--border);
+    padding: 12px 20px; border-radius: 9px; font-size: 14px; cursor: pointer;
+  }
+  button.secondary:hover { color: var(--ink); border-color: var(--ink-muted); }
+  a.dl-link {
+    color: var(--accent); font-size: 14px; text-decoration: none; border-bottom: 1px solid var(--accent);
+  }
+  .status { font-size: 13px; color: var(--ink-muted); min-height: 18px; }
+  .status.err { color: var(--danger); white-space: pre-wrap; text-align: left; max-height: 140px; overflow: auto; }
+  .spinner {
+    width: 16px; height: 16px; border-radius: 50%; border: 2px solid var(--border);
+    border-top-color: var(--accent); display: inline-block; animation: spin .8s linear infinite;
+    vertical-align: -3px; margin-right: 6px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  a.adv-link { position: fixed; bottom: 14px; right: 16px; font-size: 12px; color: var(--ink-muted); text-decoration: none; }
+  a.adv-link:hover { color: var(--ink); }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+<script type="module" src="https://unpkg.com/@google/model-viewer/dist/model-viewer.min.js"></script>
+</head>
+<body>
+
+<header class="top">
+  <div class="steps">
+    <div class="step-dot" data-step="1"><span class="n">1</span>업로드</div>
+    <div class="step-dot" data-step="2"><span class="n">2</span>방향 선택</div>
+    <div class="step-dot" data-step="3"><span class="n">3</span>절단 위치</div>
+    <div class="step-dot" data-step="4"><span class="n">4</span>완료</div>
+  </div>
+</header>
+
+<main>
+  <!-- 1단계: 업로드 -->
+  <section class="panel" id="panel1">
+    <h1>발 스캔 GLB를 올려주세요</h1>
+    <p class="sub">색/텍스처가 있는 원본 스캔 파일(.glb)이어야 합니다.</p>
+    <div class="dropzone" id="dropzone">
+      <div class="icon">📁</div>
+      <div>클릭하거나 파일을 여기로 끌어다 놓으세요</div>
+      <div class="fname" id="fname"></div>
+      <input type="file" id="fileInput" accept=".glb" hidden>
+    </div>
+    <div class="status" id="status1"></div>
+    <div class="actions">
+      <button class="primary" id="btnToStep2" disabled>다음</button>
+    </div>
+  </section>
+
+  <!-- 2단계: 방향 선택 -->
+  <section class="panel" id="panel2" hidden>
+    <h1>발바닥이 아래를 향한 방향을 골라주세요</h1>
+    <p class="sub">자동으로 찾은 후보 중 실제로 제대로 서 있는 걸 고르면 됩니다. 화살표로 넘겨보세요.</p>
+    <div class="carousel">
+      <button class="arrow" id="candPrev">‹</button>
+      <div class="cand-frame">
+        <img id="candImg" alt="방향 후보 미리보기">
+        <div class="cand-score" id="candScore"></div>
+      </div>
+      <button class="arrow" id="candNext">›</button>
+    </div>
+    <div class="dots" id="candDots"></div>
+    <div class="status" id="status2"></div>
+    <div class="actions">
+      <button class="secondary" id="btnRecrop">다른 후보 더 보기(재크롭)</button>
+      <button class="primary" id="btnToStep3" disabled>이 방향으로 선택</button>
+    </div>
+  </section>
+
+  <!-- 3단계: 절단 위치 -->
+  <section class="panel" id="panel3" hidden style="width:min(820px,94vw)">
+    <h1>발목 절단 위치를 정해주세요</h1>
+    <p class="sub">슬라이더를 움직이면 반투명한 면이 위아래로 움직입니다 -- 그 면 위쪽이 잘려나갑니다. 마우스로 돌려서 확인하세요.</p>
+    <div id="cutViewport"></div>
+    <div class="cut-controls">
+      <input type="range" id="cutSlider" min="0" max="1000" value="750">
+      <div class="cut-hint" id="cutHint">발바닥에서 위로 75%</div>
+    </div>
+    <details class="tilt-adv">
+      <summary>발바닥이 안 평평해 보이면 -- 축 미세조정</summary>
+      <div class="cut-controls">
+        <label>앞뒤 기울기 <span id="pitchVal">0°</span></label>
+        <input type="range" id="pitchSlider" min="-150" max="150" value="0">
+        <label>좌우 기울기 <span id="rollVal">0°</span></label>
+        <input type="range" id="rollSlider" min="-150" max="150" value="0">
+      </div>
+    </details>
+    <div class="status" id="status3"></div>
+    <div class="actions">
+      <button class="secondary" id="btnBackTo2">‹ 방향 다시 고르기</button>
+      <button class="primary" id="btnSave">이 위치로 저장</button>
+    </div>
+  </section>
+
+  <!-- 4단계: 완료 -->
+  <section class="panel" id="panel4" hidden>
+    <h1>완성됐습니다</h1>
+    <model-viewer id="finalViewer" camera-controls auto-rotate></model-viewer>
+    <div class="status" id="status4"></div>
+    <div class="actions">
+      <a class="dl-link" id="dlLink" download>GLB 다운로드</a>
+      <button class="secondary" id="btnRestart">새로 만들기</button>
+    </div>
+  </section>
+</main>
+
+<a class="adv-link" href="/dashboard">고급 모드(개발용) →</a>
+
+<script type="module">
+import * as THREE from "three";
+import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+
+let jobId = null;
+let candidates = [];
+let candIndex = 0;
+let croppedFile = null;
+let yMin = 0, yMax = 1;
+
+const $ = (id) => document.getElementById(id);
+
+function setStep(n) {
+  for (let i = 1; i <= 4; i++) {
+    $(`panel${i}`).hidden = i !== n;
+  }
+  document.querySelectorAll(".step-dot").forEach((el) => {
+    const s = parseInt(el.dataset.step, 10);
+    el.classList.toggle("active", s === n);
+    el.classList.toggle("done", s < n);
+  });
+}
+
+function setStatus(id, text, isErr) {
+  const el = $(id);
+  el.className = "status" + (isErr ? " err" : "");
+  el.textContent = text || "";
+}
+
+function setBusy(btn, busy, label) {
+  btn.disabled = busy;
+  if (busy) { btn.dataset.label = btn.textContent; btn.innerHTML = '<span class="spinner"></span>처리 중...'; }
+  else btn.textContent = btn.dataset.label || label;
+}
+
+async function postJSON(url, body) {
+  const res = await fetch(url, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}),
+  });
+  const data = await res.json();
+  if (!res.ok) throw data;
+  return data;
+}
+
+// ---------- 1단계: 업로드 ----------
+const dropzone = $("dropzone");
+const fileInput = $("fileInput");
+let pendingFile = null;
+
+dropzone.onclick = () => fileInput.click();
+["dragenter", "dragover"].forEach((ev) =>
+  dropzone.addEventListener(ev, (e) => { e.preventDefault(); dropzone.classList.add("drag"); }));
+["dragleave", "drop"].forEach((ev) =>
+  dropzone.addEventListener(ev, (e) => { e.preventDefault(); dropzone.classList.remove("drag"); }));
+dropzone.addEventListener("drop", (e) => {
+  const f = e.dataTransfer.files[0];
+  if (f) selectFile(f);
+});
+fileInput.onchange = () => { if (fileInput.files[0]) selectFile(fileInput.files[0]); };
+
+function selectFile(f) {
+  pendingFile = f;
+  $("fname").textContent = f.name;
+  $("btnToStep2").disabled = false;
+}
+
+$("btnToStep2").onclick = async () => {
+  const btn = $("btnToStep2");
+  setBusy(btn, true);
+  setStatus("status1", "");
+  try {
+    const fd = new FormData();
+    fd.append("file", pendingFile);
+    const res = await fetch("/api/upload", { method: "POST", body: fd });
+    const data = await res.json();
+    if (!res.ok) throw data;
+    jobId = data.job_id;
+    await loadOrientationCandidates();
+    setStep(2);
+  } catch (err) {
+    setStatus("status1", (err.error || "업로드 실패"), true);
+  }
+  setBusy(btn, false, "다음");
+};
+
+// ---------- 2단계: 방향 캐러셀 ----------
+const CAND_BATCH = 5; // 처음엔 이만큼만 보여주고, "더 보기"는 이미 받아둔 후보 중 다음 묶음을 보여줌(재크롭 안 함)
+let visibleCount = CAND_BATCH;
+
+async function loadOrientationCandidates() {
+  setStatus("status2", "발을 검출하고 방향 후보를 계산하는 중... (약 20-30초)");
+  const data = await postJSON(`/api/stage1_orientation/${jobId}`, {});
+  candidates = data.candidates;
+  croppedFile = data.cropped_file;
+  candIndex = 0;
+  visibleCount = Math.min(CAND_BATCH, candidates.length);
+  renderCandidate();
+  updateRecropButton();
+  setStatus("status2", "");
+}
+
+function updateRecropButton() {
+  const btn = $("btnRecrop");
+  btn.dataset.label = visibleCount < candidates.length
+    ? `다른 후보 더 보기 (${visibleCount}/${candidates.length})`
+    : "다른 후보 더 보기(재크롭)";
+  btn.textContent = btn.dataset.label;
+}
+
+function renderCandidate() {
+  const c = candidates[candIndex];
+  $("candImg").src = `/jobs/${jobId}/${c.thumbnail}?t=${Date.now()}`;
+  $("candScore").textContent = `#${c.index + 1} · 접점수 ${c.score}`;
+  $("candPrev").disabled = candIndex === 0;
+  $("candNext").disabled = candIndex === visibleCount - 1;
+  $("btnToStep3").disabled = false;
+  const dots = $("candDots");
+  dots.innerHTML = "";
+  for (let i = 0; i < visibleCount; i++) {
+    const d = document.createElement("div");
+    d.className = "d" + (i === candIndex ? " on" : "");
+    dots.appendChild(d);
+  }
+}
+
+$("candPrev").onclick = () => { if (candIndex > 0) { candIndex--; renderCandidate(); } };
+$("candNext").onclick = () => { if (candIndex < visibleCount - 1) { candIndex++; renderCandidate(); } };
+
+$("btnRecrop").onclick = async () => {
+  const btn = $("btnRecrop");
+  // 아직 안 보여준 후보가 남아있으면 재크롭 없이 그냥 더 보여준다.
+  if (visibleCount < candidates.length) {
+    candIndex = visibleCount;
+    visibleCount = Math.min(visibleCount + CAND_BATCH, candidates.length);
+    renderCandidate();
+    updateRecropButton();
+    return;
+  }
+  setBusy(btn, true);
+  try { await loadOrientationCandidates(); }
+  catch (err) { setStatus("status2", (err.error || "재크롭 실패"), true); }
+  setBusy(btn, false, "다른 후보 더 보기(재크롭)");
+};
+
+$("btnToStep3").onclick = async () => {
+  const btn = $("btnToStep3");
+  setBusy(btn, true);
+  setStatus("status2", "");
+  try {
+    const chosen = candidates[candIndex];
+    const data = await postJSON(`/api/align_for_cut/${jobId}`, {
+      cropped_file: croppedFile, down_direction: chosen.direction,
+    });
+    yMin = data.y_min; yMax = data.y_max;
+    await loadCutViewer(`/jobs/${jobId}/${data.preview_file}`);
+    setStep(3);
+  } catch (err) {
+    setStatus("status2", (err.error || "정렬 실패"), true);
+  }
+  setBusy(btn, false, "이 방향으로 선택");
+};
+
+$("btnBackTo2").onclick = () => setStep(2);
+
+// ---------- 3단계: three.js 절단 미리보기 ----------
+let scene, camera, renderer, controls, cutPlaneMesh, loadedMesh, floorGrid;
+
+function initCutViewer() {
+  const el = $("cutViewport");
+  scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x05100c);
+
+  camera = new THREE.PerspectiveCamera(45, el.clientWidth / el.clientHeight, 0.001, 100);
+  renderer = new THREE.WebGLRenderer({ antialias: true });
+  renderer.setSize(el.clientWidth, el.clientHeight);
+  renderer.setPixelRatio(window.devicePixelRatio);
+  el.innerHTML = "";
+  el.appendChild(renderer.domElement);
+
+  scene.add(new THREE.AmbientLight(0xffffff, 0.7));
+  const dl = new THREE.DirectionalLight(0xffffff, 1.0);
+  dl.position.set(1, 2, 1);
+  scene.add(dl);
+  const dl2 = new THREE.DirectionalLight(0x88ccbb, 0.4);
+  dl2.position.set(-1, -1, -1);
+  scene.add(dl2);
+
+  controls = new OrbitControls(camera, renderer.domElement);
+  controls.enableDamping = true;
+
+  const planeGeo = new THREE.PlaneGeometry(1, 1);
+  const planeMat = new THREE.MeshBasicMaterial({
+    color: 0x35b58c, transparent: true, opacity: 0.28, side: THREE.DoubleSide, depthWrite: false,
+  });
+  cutPlaneMesh = new THREE.Mesh(planeGeo, planeMat);
+  cutPlaneMesh.rotation.x = Math.PI / 2; // XZ 평면(법선 = Y)
+  scene.add(cutPlaneMesh);
+
+  floorGrid = new THREE.GridHelper(1, 20, 0x2b302e, 0x1c2320);
+  scene.add(floorGrid);
+
+  window.addEventListener("resize", () => {
+    if (!el.clientWidth) return;
+    camera.aspect = el.clientWidth / el.clientHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(el.clientWidth, el.clientHeight);
+  });
+
+  (function animate() {
+    requestAnimationFrame(animate);
+    controls.update();
+    renderer.render(scene, camera);
+  })();
+}
+
+async function loadCutViewer(glbUrl) {
+  if (!renderer) initCutViewer();
+  if (loadedMesh) { scene.remove(loadedMesh); loadedMesh = null; }
+
+  const loader = new GLTFLoader();
+  const gltf = await loader.loadAsync(glbUrl);
+  loadedMesh = gltf.scene;
+  loadedMesh.traverse((o) => {
+    if (o.isMesh) { o.material.side = THREE.DoubleSide; }
+  });
+  scene.add(loadedMesh);
+
+  const box = new THREE.Box3().setFromObject(loadedMesh);
+  const size = box.getSize(new THREE.Vector3());
+  const center = box.getCenter(new THREE.Vector3());
+  const radius = size.length() * 0.6;
+
+  camera.position.set(center.x + radius * 0.7, center.y + radius * 0.5, center.z + radius * 0.7);
+  controls.target.copy(center);
+  controls.update();
+
+  const planeSize = Math.max(size.x, size.z) * 1.6;
+  cutPlaneMesh.geometry.dispose();
+  cutPlaneMesh.geometry = new THREE.PlaneGeometry(planeSize, planeSize);
+  cutPlaneMesh.position.set(center.x, 0, center.z);
+
+  floorGrid.scale.setScalar(planeSize);
+  floorGrid.position.set(center.x, yMin, center.z);
+
+  // 새로 불러올 때마다 미세조정은 초기화(이전 방향 후보의 회전이 남지 않게).
+  $("pitchSlider").value = 0; $("rollSlider").value = 0;
+  $("pitchVal").textContent = "0°"; $("rollVal").textContent = "0°";
+  loadedMesh.rotation.set(0, 0, 0);
+
+  updateSliderPosition();
+}
+
+function applyTilt() {
+  const pitch = parseInt($("pitchSlider").value, 10) / 10;
+  const roll = parseInt($("rollSlider").value, 10) / 10;
+  $("pitchVal").textContent = `${pitch.toFixed(1)}°`;
+  $("rollVal").textContent = `${roll.toFixed(1)}°`;
+  if (loadedMesh) {
+    loadedMesh.rotation.x = THREE.MathUtils.degToRad(pitch);
+    loadedMesh.rotation.z = THREE.MathUtils.degToRad(roll);
+  }
+}
+
+$("pitchSlider").oninput = applyTilt;
+$("rollSlider").oninput = applyTilt;
+
+function sliderToY() {
+  const t = parseInt($("cutSlider").value, 10) / 1000;
+  return yMin + t * (yMax - yMin);
+}
+
+function updateSliderPosition() {
+  const y = sliderToY();
+  if (cutPlaneMesh) cutPlaneMesh.position.y = y;
+  const pct = Math.round(((y - yMin) / (yMax - yMin)) * 100);
+  $("cutHint").textContent = `발바닥에서 위로 ${pct}% (${y.toFixed(4)})`;
+}
+
+$("cutSlider").oninput = updateSliderPosition;
+
+$("btnSave").onclick = async () => {
+  const btn = $("btnSave");
+  setBusy(btn, true);
+  setStatus("status3", "");
+  try {
+    const y = sliderToY();
+    // 각도를 다시 계산하지 않고 three.js가 실제로 쓴 쿼터니언을 그대로 보낸다
+    // (Euler 축 순서 컨벤션 어긋남 위험 없이 뷰어에서 본 그대로 저장되도록).
+    const quat = loadedMesh ? loadedMesh.quaternion.toArray() : null;
+    const data = await postJSON(`/api/cut_and_save/${jobId}`, { y, quat });
+    $("finalViewer").src = `/jobs/${jobId}/${data.file}`;
+    $("dlLink").href = `/jobs/${jobId}/${data.file}?download=1`;
+    setStatus("status4", `정점 ${data.n_vertices.toLocaleString()}개, 면 ${data.n_faces.toLocaleString()}개`);
+    setStep(4);
+  } catch (err) {
+    setStatus("status3", (err.error || "저장 실패") + (err.log ? "\n\n" + err.log : ""), true);
+  }
+  setBusy(btn, false, "이 위치로 저장");
+};
+
+$("btnRestart").onclick = () => {
+  jobId = null; candidates = []; candIndex = 0; visibleCount = CAND_BATCH; croppedFile = null; pendingFile = null;
+  fileInput.value = ""; $("fname").textContent = ""; $("btnToStep2").disabled = true;
+  setStatus("status1", ""); setStatus("status2", ""); setStatus("status3", ""); setStatus("status4", "");
+  setStep(1);
+};
+
+setStep(1);
+</script>
+</body>
+</html>
