@@ -23,7 +23,12 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-from rembg import new_session, remove
+
+# rembg는 generate_foot_masks()(사진 기반 SfM 파이프라인 전용, 텍스처 크롭
+# 경로는 안 씀)에서만 필요해 그 함수 안에서 지연 임포트한다 -- 모듈 최상단에
+# 두면 PyInstaller로 얼린 exe에서 rembg의 하위 의존성 pymatting이 자기
+# 버전을 importlib.metadata로 못 찾아 죽는 문제가 있었다(실측 확인: 텍스처
+# 크롭만 쓰는 웹앱 마법사는 이 임포트 자체가 필요 없는데도 죽었음).
 
 from .reconstruction import IMAGE_EXTS
 
@@ -174,6 +179,8 @@ def generate_masks(
          "rejected": 제외된 장 수, "rejected_names": 제외된 파일명 목록,
          "rejected_reasons": 사유별 집계(no_foot/low_coverage/skin_refine_collapsed)}.
     """
+    from rembg import new_session, remove
+
     if not images_dir.is_dir():
         raise FileNotFoundError(f"이미지 폴더가 없습니다: {images_dir}")
 
