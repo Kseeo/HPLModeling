@@ -20,7 +20,18 @@ from pathlib import Path
 import numpy as np
 import trimesh
 
-from foot_engine.sfm.dense import finalize_mesh, find_floor_contact_mask
+from foot_engine.sfm.dense import (
+    DEFAULT_REFERENCE_LENGTH_MM,
+    align_sole_down,
+    cut_at_height,
+    finalize_mesh,
+    find_floor_contact_mask,
+    keep_largest_component,
+    prune_far_fragments,
+    rest_on_floor,
+    to_z_up,
+)
+from foot_engine.sfm.geometry import measured_length
 
 from .branch_cut import pick_most_foot_like, suggest_bend_components, suggest_neck_components
 from .finishing import postprocess_mesh
@@ -120,6 +131,7 @@ def finish_foot_mesh(
     target_vertices: int | None = None,
     decimate_smooth_after: bool = True,
     down_direction: np.ndarray | None = None,
+    trim_leg_kwargs: dict | None = None,
     prune_neck_fragments: bool = False,
     prune_neck_fragments_kwargs: dict | None = None,
     # 4) 접지 노드
@@ -131,8 +143,9 @@ def finish_foot_mesh(
     `down_direction`을 지정하면 `finalize_mesh()`의 자동 발바닥 방향 탐색을
     건너뛰고 그 방향을 그대로 쓴다 -- `sole_direction_candidates_for_mesh()`가
     준 후보 중 사람이 고른 걸 넣는 용도(자동 1등이 가끔 틀려서 발이 옆으로
-    누운 채 정렬되는 사례 확인, `dense.align_sole_down` 참고). 나머지 인자
-    설명은 `process_glb_to_foot()` 참고.
+    누운 채 정렬되는 사례 확인, `dense.align_sole_down` 참고). `trim_leg_kwargs`는
+    `finalize_mesh()`로 그대로 전달(발목 절단 반등 탐지 끄기 등, 그쪽 참고).
+    나머지 인자 설명은 `process_glb_to_foot()` 참고.
     """
     out_mesh = cropped_mesh
 
@@ -160,6 +173,7 @@ def finish_foot_mesh(
             target_vertices=target_vertices,
             decimate_smooth_after=decimate_smooth_after,
             down_direction=down_direction,
+            trim_leg_kwargs=trim_leg_kwargs,
         )
         print(f"[foot-pipeline] 정렬 완료(x{scale_factor:.4f} 스케일, {up_axis}-up, 발바닥={up_axis}0)")
 
@@ -185,6 +199,112 @@ def finish_foot_mesh(
         n_input_vertices=n_input_vertices,
         scale_factor=scale_factor,
         up_axis=up_axis,
+        floor_contact_mask=floor_contact_mask,
+    )
+
+
+def align_for_manual_cut(
+    cropped_mesh: trimesh.Trimesh,
+    *,
+    down_direction: np.ndarray,
+) -> trimesh.Trimesh:
+    """수동 발목 절단 UI 1단계: 최대 연결요소만 남기고 정렬까지만 한다
+    (자르기/스케일 전, 원본 SfM 단위 그대로).
+
+    `find_ankle_cut_height()`의 폭곡선 반등 탐지가 노이즈 많은 스캔에서
+    엉뚱한 높이를 골라 뒤꿈치까지 잘려나가는 사례가 반복 확인돼(project_5)
+    사람이 3D로 직접 보고 절단 높이(Y)를 고르는 UI를 만들었다 -- 이 함수는
+    그 UI가 보여줄 "자르기 전" 상태를 만든다. `down_direction`은
+    `sole_direction_candidates_for_mesh()`가 준 방향을 그대로 넣을 것.
+    """
+    mesh, _, _ = keep_largest_component(cropped_mesh)
+    return align_sole_down(mesh, down_direction=down_direction)
+
+
+def cut_and_finish_mesh(
+    aligned_mesh: trimesh.Trimesh,
+    *,
+    cut_y: float,
+    n_input_vertices: int = 0,
+    reference_length_mm: float | None = None,
+    z_up: bool = True,
+    prune_neck_fragments: bool = True,
+    prune_neck_fragments_kwargs: dict | None = None,
+    postprocess: bool = True,
+    sand_iterations: int = 3,
+    curvature_iterations: int = 150,
+    finish_smooth_iterations: int = 10,
+    fill_holes_max_diameter_ratio: float = 0.05,
+    fill_round_holes_enabled: bool = True,
+    fill_round_holes_min_circularity: float = 0.5,
+    floor_contact_tolerance_mm: float | None = 2.0,
+) -> FootPipelineResult:
+    """수동 발목 절단 UI 2단계: `align_for_manual_cut()`이 만든 메쉬를 사람이
+    고른 `cut_y`에서 자르고 스케일+정리+(선택)스무딩까지 마무리한다 -- "저장"
+    버튼용, `postprocess=True`가 기본이라 스무딩까지 한 번에 끝난다.
+
+    스무딩을 절단 **전에** 한다(2026-09-01부터, 이전엔 절단 후) -- 실측으로
+    순서를 바꿔보니 절단 후 스무딩은 사포질/고곡률 스무딩이 경계 전용이
+    아니라서 방금 만든 깨끗한 절단면을 다시 흐트러뜨렸다. 이미 매끈해진
+    표면을 자르면 새 절단면 자체가 애초에 깨끗하게 나와 후처리가 필요 없다.
+    스케일은 여전히 절단 **후** 계산(절단 전 길이엔 다리까지 포함돼 있어
+    발 길이 기준으로 못 씀).
+    """
+    mesh = aligned_mesh
+    if postprocess:
+        mesh, _ = postprocess_mesh(
+            mesh,
+            sand_iterations=sand_iterations,
+            curvature_iterations=curvature_iterations,
+            finish_smooth_iterations=finish_smooth_iterations,
+            fill_holes_max_diameter_ratio=fill_holes_max_diameter_ratio,
+            fill_round_holes_enabled=fill_round_holes_enabled,
+            fill_round_holes_min_circularity=fill_round_holes_min_circularity,
+        )
+
+    mesh = cut_at_height(mesh, cut_y)
+    mesh = prune_far_fragments(mesh)
+
+    resolved_reference_length_mm = reference_length_mm
+    if resolved_reference_length_mm is None:
+        resolved_reference_length_mm = DEFAULT_REFERENCE_LENGTH_MM
+        print(
+            f"[스케일] 자기신고 발길이 없음 — placeholder {DEFAULT_REFERENCE_LENGTH_MM:.0f}mm 기준으로"
+            " 스케일링(절대 축척 아님, 형태 비교/시각화용 임시값 — 실사용 전 반드시 확인할 것)"
+        )
+    own_length = measured_length(mesh.vertices)
+    scale_factor = resolved_reference_length_mm / own_length
+    mesh.apply_scale(scale_factor)
+    print(
+        f"[스케일] 메쉬 자체 PCA 길이 {own_length:.4f}(SfM 임의 단위) -> "
+        f"{resolved_reference_length_mm:.1f}mm 기준(x{scale_factor:.4f})"
+    )
+
+    if prune_neck_fragments:
+        n_before = len(mesh.vertices)
+        components = suggest_neck_components(mesh, **(prune_neck_fragments_kwargs or {}))
+        if len(components) > 1:
+            chosen = pick_most_foot_like(components)
+            mesh = chosen.mesh
+            print(
+                f"[cut] 목(neck) 감지로 파편 조각 분리: {len(components)}개 중 "
+                f"발 모양 점수로 채택(정점 {n_before:,} -> {len(mesh.vertices):,})"
+            )
+
+    mesh = rest_on_floor(mesh)
+
+    floor_contact_mask: np.ndarray | None = None
+    if floor_contact_tolerance_mm is not None:
+        floor_contact_mask = find_floor_contact_mask(mesh, tolerance_mm=floor_contact_tolerance_mm, up_axis=1)
+
+    if z_up:
+        mesh = to_z_up(mesh)
+
+    return FootPipelineResult(
+        mesh=mesh,
+        n_input_vertices=n_input_vertices,
+        scale_factor=scale_factor,
+        up_axis="Z" if z_up else "Y",
         floor_contact_mask=floor_contact_mask,
     )
 
@@ -227,6 +347,7 @@ def process_glb_to_foot(
     target_vertices: int | None = None,
     decimate_smooth_after: bool = True,
     down_direction: np.ndarray | None = None,
+    trim_leg_kwargs: dict | None = None,
     # 4) 접지 노드
     floor_contact_tolerance_mm: float | None = None,
 ) -> FootPipelineResult:
@@ -302,7 +423,7 @@ def process_glb_to_foot(
         fill_round_holes_min_circularity=fill_round_holes_min_circularity,
         align=align, reference_length_mm=reference_length_mm, trim_leg=trim_leg, z_up=z_up,
         target_vertices=target_vertices, decimate_smooth_after=decimate_smooth_after,
-        down_direction=down_direction,
+        down_direction=down_direction, trim_leg_kwargs=trim_leg_kwargs,
         prune_neck_fragments=prune_neck_fragments, prune_neck_fragments_kwargs=prune_neck_fragments_kwargs,
         floor_contact_tolerance_mm=floor_contact_tolerance_mm,
     )

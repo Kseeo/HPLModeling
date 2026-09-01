@@ -180,6 +180,43 @@ def fill_round_holes(
     return out, len(round_holes)
 
 
+def smooth_boundary_loops(
+    mesh: trimesh.Trimesh, *, iterations: int = 15, lamb: float = 0.5,
+) -> trimesh.Trimesh:
+    """열린 경계(발목 절단면 등)를 경계 그래프 이웃 평균으로만 다듬는다.
+
+    일반 라플라시안 스무딩은 경계 정점이 한쪽에만 이웃이 있어 덜 매끄러워지고,
+    그 결과 절단면 테두리가 톱니처럼 남는다(project_5류 저신뢰 스캔에서
+    실측 확인). 사이클 순서(`networkx.cycle_basis`)에 기대지 않고 경계
+    엣지에서 직접 이웃을 모아 평균한다 -- 경계가 한 점에서 갈라지는(분기점,
+    차수 4 이상) 지저분한 위상에서도 순서 꼬임 없이 안전하게 동작한다.
+    표면 안쪽 정점은 건드리지 않는다.
+    """
+    boundary_groups = trimesh.grouping.group_rows(mesh.edges_sorted, require_count=1)
+    if len(boundary_groups) < 3:
+        return mesh
+    boundary = mesh.edges[boundary_groups]
+
+    adj: dict[int, set[int]] = {}
+    for a, b in boundary:
+        adj.setdefault(int(a), set()).add(int(b))
+        adj.setdefault(int(b), set()).add(int(a))
+
+    v = mesh.vertices.copy()
+    idxs = np.array(list(adj.keys()))
+    for _ in range(iterations):
+        new_v = v.copy()
+        for i in idxs:
+            neighbors = list(adj[i])
+            avg = v[neighbors].mean(axis=0)
+            new_v[i] = v[i] + lamb * (avg - v[i])
+        v = new_v
+
+    out = mesh.copy()
+    out.vertices = v
+    return out
+
+
 def _ring_neighbors_padded(
     adjacency: list, *, min_neighbors: int, max_neighbors: int
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -398,6 +435,9 @@ def postprocess_mesh(
     fill_round_holes_enabled: bool = False,
     fill_round_holes_min_circularity: float = 0.7,
     fill_round_holes_max_diameter_ratio: float = 0.6,
+    smooth_boundary_enabled: bool = True,
+    smooth_boundary_iterations: int = 15,
+    smooth_boundary_lambda: float = 0.5,
     sand_surface_enabled: bool = True,
     sand_min_neighbors: int = 16,
     sand_max_neighbors: int = 32,
@@ -417,6 +457,8 @@ def postprocess_mesh(
 
     Args:
         keep_largest(True): 가장 큰 연결 요소만 남기고 부유 파편 제거.
+        smooth_boundary_enabled(True): 열린 경계(발목 절단면 등) 테두리를
+            `smooth_boundary_loops()`로 다듬어 톱니 모양을 완화한다.
         fill_holes(True): 작은 구멍(핀홀)만 메움 -- 큰 구멍은 그대로.
         fill_round_holes_enabled(False): 원형 구멍(단순 미관측 결손 추정)은
             크더라도 메움(`fill_round_holes()` 참고) -- 발목 절단면처럼
@@ -457,6 +499,12 @@ def postprocess_mesh(
         if n_round_filled:
             print(f"[finishing] 원형 구멍 메움: {n_round_filled}개")
             stats.steps_applied.append("fill_round_holes")
+
+    if smooth_boundary_enabled:
+        mesh = smooth_boundary_loops(
+            mesh, iterations=smooth_boundary_iterations, lamb=smooth_boundary_lambda,
+        )
+        stats.steps_applied.append("smooth_boundary_loops")
 
     if sand_surface_enabled:
         mesh = sand_surface(

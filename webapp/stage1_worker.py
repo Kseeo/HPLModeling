@@ -45,6 +45,11 @@ def main() -> int:
     p.add_argument("--prune_neck_fragments", type=int, default=1)
     p.add_argument("--recover_holes", type=int, default=0)
     p.add_argument("--reject_color_outliers", type=int, default=0)
+    # 발목 절단 폭곡선 반등 탐지가 노이즈 많은 스캔에서 엉뚱한 높이를 "다리"로
+    # 오판해 뒤꿈치까지 잘려나가는 사례 확인(project_5) -- 켜면 반등 탐지를
+    # 사실상 끄고 고정 비율(max_length_ratio) 절단만 쓴다. 기본 꺼짐(정상
+    # 스캔은 반등 탐지가 더 정확).
+    p.add_argument("--trim_leg_no_rebound", type=int, default=0)
     # 방향 후보 픽커(stage1_orientation_worker.py)가 이미 크롭해둔 결과가 있으면
     # 그걸 재사용하고(다중뷰 렌더링 재실행 안 함), 사용자가 고른 방향으로 정렬한다.
     p.add_argument("--cropped_input", default=None)
@@ -79,6 +84,7 @@ def main() -> int:
         floor_contact_tolerance_mm=2.0,
         z_up=False,
         down_direction=down_direction,
+        trim_leg_kwargs={"rebound_ratio": 999.0} if args.trim_leg_no_rebound else None,
         prune_neck_fragments=bool(args.prune_neck_fragments),
     )
     out_path = Path(args.output)

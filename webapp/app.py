@@ -63,16 +63,46 @@ CHECKPOINTS_DIR = HPLAI_DIR / "checkpoints_local"
 # (1단계에서 미리 축약하지 않음, 2026-09-01부터).
 DEFAULT_TARGET_FACES = 36238
 
-JOBS_DIR = Path(__file__).resolve().parent / "jobs"
+# 얼린(frozen) exe엔 별도 python.exe가 없어 "python.exe stage1_worker.py" 식
+# 호출이 안 된다 -- 대신 이 exe 자체를 특수 플래그로 재귀 호출한다
+# (launcher.py의 워커 분기 참고). 개발 모드(python app.py)에서는 기존 그대로.
+# 얼린 상태에서 `__file__` 기준 경로는 PyInstaller 번들 구조를 못 따라간다.
+# 두 위치를 구분해야 함(실측으로 확인, 서로 다름):
+#   - _APP_DIR(exe 옆): 잡(job) 데이터처럼 쓰기 가능해야 하는 것.
+#   - _BUNDLE_DIR(sys._MEIPASS): --add-data로 넣은 읽기전용 번들 자산
+#     (templates/, data/models/) -- onedir는 `_internal/`, onefile은 임시
+#     추출 폴더라 exe 옆이 아님.
+FROZEN = getattr(sys, "frozen", False)
+_APP_DIR = Path(sys.executable).resolve().parent if FROZEN else Path(__file__).resolve().parent
+_BUNDLE_DIR = Path(sys._MEIPASS) if FROZEN else Path(__file__).resolve().parent  # type: ignore[attr-defined]
+
+JOBS_DIR = _APP_DIR / "jobs"
 JOBS_DIR.mkdir(exist_ok=True)
 
 from foot_engine.sfm.dense import find_floor_contact_mask, rest_on_floor  # noqa: E402
-from foot_engine.stl_foot_extract.finishing import finish_smooth_mesh, postprocess_mesh  # noqa: E402
-
+from foot_engine.stl_foot_extract.finishing import finish_smooth_mesh, postprocess_mesh, smooth_boundary_loops  # noqa: E402
+from foot_engine.stl_foot_extract.postprocess_pipeline import (  # noqa: E402
+    align_for_manual_cut,
+    cut_and_finish_mesh,
+)
 STAGE1_WORKER = Path(__file__).resolve().parent / "stage1_worker.py"
 STAGE1_ORIENTATION_WORKER = Path(__file__).resolve().parent / "stage1_orientation_worker.py"
 
-app = Flask(__name__)
+
+def _stage1_worker_cmd() -> list[str]:
+    if FROZEN:
+        return [sys.executable, "--stage1-worker"]
+    return [sys.executable, str(STAGE1_WORKER)]
+
+
+def _stage1_orientation_worker_cmd() -> list[str]:
+    if FROZEN:
+        return [sys.executable, "--stage1-orientation-worker"]
+    return [sys.executable, str(STAGE1_ORIENTATION_WORKER)]
+
+# 얼린(frozen) exe에서는 Flask 기본 template_folder 추정(모듈 위치 기준)이
+# PyInstaller 번들 임시 폴더 구조를 못 따라간다 -- exe 옆 templates/를 명시.
+app = Flask(__name__, template_folder=str(_BUNDLE_DIR / "templates")) if FROZEN else Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 512 * 1024 * 1024  # 512MB
 
 
@@ -92,7 +122,14 @@ def floor_contact_path(glb_path: Path) -> Path:
 # ---------------------------------------------------------------------------
 
 @app.route("/")
+def wizard():
+    """사용자용 마법사 화면(업로드 -> 방향 선택 -> 절단 -> 저장), 한 번에 한 단계만 크게."""
+    return render_template("wizard.html")
+
+
+@app.route("/dashboard")
 def index():
+    """개발/디버그용 기존 대시보드(4단계 한 화면, GNN 추론 포함)."""
     checkpoints = sorted(p.name for p in CHECKPOINTS_DIR.glob("*.pt")) if CHECKPOINTS_DIR.is_dir() else []
     return render_template("index.html", checkpoints=checkpoints)
 
@@ -130,8 +167,7 @@ def api_stage1_orientation(job_id):
 
         out_cropped = d / "1a_cropped.glb"
         result_json = d / "1a_orientation_result.json"
-        cmd = [
-            sys.executable, str(STAGE1_ORIENTATION_WORKER),
+        cmd = _stage1_orientation_worker_cmd() + [
             "--input", str(inputs[0]), "--output_cropped", str(out_cropped),
             "--job_dir", str(d), "--result_json", str(result_json),
         ]
@@ -146,6 +182,99 @@ def api_stage1_orientation(job_id):
         return jsonify(**info)
     except subprocess.TimeoutExpired:
         return jsonify(error="방향 후보 계산 시간 초과(10분)"), 500
+    except Exception as e:  # noqa: BLE001
+        traceback.print_exc()
+        return jsonify(error=str(e)), 500
+
+
+@app.route("/api/align_for_cut/<job_id>", methods=["POST"])
+def api_align_for_cut(job_id):
+    """마법사 3단계: 고른 방향으로 정렬만 한다(자르기/스케일 전) -- 발목 절단
+    슬라이더가 3D로 보여줄 대상. pyglet 렌더링이 없는 순수 CPU 연산이라
+    subprocess 격리 없이 바로 처리(크롭 단계와 다름)."""
+    try:
+        d = job_dir(job_id)
+        args = request.get_json(silent=True) or {}
+        cropped_file = args.get("cropped_file")
+        down_direction = args.get("down_direction")
+        if not cropped_file or not down_direction:
+            return jsonify(error="cropped_file과 down_direction이 필요합니다"), 400
+
+        mesh = trimesh.load(d / cropped_file, force="mesh", process=False)
+        aligned = align_for_manual_cut(mesh, down_direction=np.array(down_direction, dtype=np.float64))
+
+        # 실제 절단(cut_and_save)은 이 고해상도 원본으로 함 -- 텍스처 포함이라
+        # 몇 MB(실측 최대 6.4MB)씩 나가 three.js 뷰어 로딩이 느렸다(실측 확인).
+        out_path = d / "3_aligned_for_cut.glb"
+        aligned.export(out_path)
+
+        # 3단계 뷰어는 절단 위치만 보면 되니 사진 텍스처가 필요 없다 -- 축약
+        # +단색으로 따로 가벼운 미리보기를 만들어 로딩을 빠르게 한다(실측:
+        # 6.4MB -> 122KB, 52배). Y범위는 축약해도 거의 그대로(4째자리 오차).
+        preview_path = d / "3_preview.glb"
+        # 경계(절단면 테두리)를 축약 전에 먼저 다듬는다 -- 축약 후에 하면
+        # 이미 뭉툭해진 톱니가 더 도드라져 보인다(실측 확인).
+        preview_source = smooth_boundary_loops(aligned)
+        preview_faces = min(len(preview_source.faces), 6000)
+        if len(preview_source.faces) > preview_faces:
+            preview = preview_source.simplify_quadric_decimation(face_count=preview_faces)
+        else:
+            preview = preview_source.copy()
+        preview.visual = trimesh.visual.ColorVisuals(mesh=preview, vertex_colors=[200, 170, 150, 255])
+        preview.export(preview_path)
+
+        y = aligned.vertices[:, 1]
+        return jsonify(
+            file=out_path.name,
+            preview_file=preview_path.name,
+            n_vertices=len(aligned.vertices),
+            y_min=float(y.min()),
+            y_max=float(y.max()),
+        )
+    except Exception as e:  # noqa: BLE001
+        traceback.print_exc()
+        return jsonify(error=str(e)), 500
+
+
+@app.route("/api/cut_and_save/<job_id>", methods=["POST"])
+def api_cut_and_save(job_id):
+    """마법사 4단계("저장" 버튼): 사람이 고른 Y 높이에서 잘라 스케일+정리+
+    스무딩까지 한 번에 마친다(pyglet 없음, subprocess 격리 불필요)."""
+    try:
+        d = job_dir(job_id)
+        args = request.get_json(silent=True) or {}
+        cut_y = args.get("y")
+        if cut_y is None:
+            return jsonify(error="y가 필요합니다"), 400
+        reference_length_mm = args.get("reference_length_mm")
+        quat = args.get("quat")  # three.js Quaternion.toArray() = [x,y,z,w]
+
+        aligned = trimesh.load(d / "3_aligned_for_cut.glb", force="mesh", process=False)
+        if quat:
+            # 3단계 뷰어의 미세조정 슬라이더가 만든 회전을 각도로 재계산하지 않고
+            # three.js가 실제로 쓰는 쿼터니언을 그대로 받아 적용한다 -- Euler 축
+            # 순서 컨벤션(XYZ가 Rx·Ry·Rz인지 반대인지)을 직접 맞추려다 뷰어에서
+            # 본 것과 저장 결과가 미세하게 어긋나는 위험을 아예 없앤다. trimesh는
+            # [w,x,y,z] 순서를 받으므로 재배열.
+            x, y, z, w = quat
+            rot = trimesh.transformations.quaternion_matrix([w, x, y, z])
+            aligned.apply_transform(rot)
+        result = cut_and_finish_mesh(
+            aligned, cut_y=float(cut_y), reference_length_mm=reference_length_mm,
+            z_up=False, floor_contact_tolerance_mm=2.0,
+        )
+
+        out_path = d / "4_final.glb"
+        result.mesh.export(out_path)
+        if result.floor_contact_mask is not None:
+            np.save(d / "4_final_floor_contact.npy", result.floor_contact_mask)
+
+        return jsonify(
+            file=out_path.name,
+            n_vertices=len(result.mesh.vertices),
+            n_faces=len(result.mesh.faces),
+            scale_factor=result.scale_factor,
+        )
     except Exception as e:  # noqa: BLE001
         traceback.print_exc()
         return jsonify(error=str(e)), 500
@@ -174,19 +303,20 @@ def api_stage1(job_id):
         prune_neck_fragments = bool(args.get("prune_neck_fragments", True))
         recover_holes = bool(args.get("recover_holes", False))
         reject_color_outliers = bool(args.get("reject_color_outliers", False))
+        trim_leg_no_rebound = bool(args.get("trim_leg_no_rebound", False))
         down_direction = args.get("down_direction")  # [x,y,z] -- 방향 후보 픽커에서 고른 값
         cropped_file = args.get("cropped_file")  # 방향 후보 픽커가 캐싱해둔 크롭 결과 파일명
 
         out_path = d / "1_crop_ankle.glb"
         result_json = d / "1_crop_ankle_result.json"
-        cmd = [
-            sys.executable, str(STAGE1_WORKER),
+        cmd = _stage1_worker_cmd() + [
             "--input", str(inputs[0]), "--output", str(out_path),
             "--trim_leg", "1" if trim_leg else "0",
             "--two_pass", "1" if two_pass else "0",
             "--prune_neck_fragments", "1" if prune_neck_fragments else "0",
             "--recover_holes", "1" if recover_holes else "0",
             "--reject_color_outliers", "1" if reject_color_outliers else "0",
+            "--trim_leg_no_rebound", "1" if trim_leg_no_rebound else "0",
             "--result_json", str(result_json),
         ]
         if reference_length_mm:

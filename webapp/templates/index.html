@@ -44,7 +44,8 @@
       <label><input type="checkbox" id="s1_trim_leg" checked> trim_leg</label>
       <label>reference_length_mm <input type="number" id="s1_ref_len" placeholder="(선택)" style="width:80px"></label><br>
       <label><input type="checkbox" id="s1_two_pass"> 2-pass 재프레이밍 (배경이 씬 대부분을 차지하는 스캔용, 배경 적은 정상 스캔엔 끄고 쓸 것)</label><br>
-      <label><input type="checkbox" id="s1_prune_neck" checked> 목(neck) 파편 제거 (거리 기반으론 안 잡히는 가늘고 긴 파편 절단, 9샘플 검증됨)</label>
+      <label><input type="checkbox" id="s1_prune_neck" checked> 목(neck) 파편 제거 (거리 기반으론 안 잡히는 가늘고 긴 파편 절단, 9샘플 검증됨)</label><br>
+      <label><input type="checkbox" id="s1_no_rebound"> 발목 절단 반등탐지 끄기 (폭곡선이 노이즈투성이라 반등탐지가 엉뚱한 높이를 다리로 오판, 뒤꿈치까지 잘려나갈 때만 켤 것 -- project_5 실측: 32% 유실→거의 무손실로 개선)</label>
     </details>
     <span class="hint">recover_holes/reject_color_outliers는 실전 검증 부족(회귀 위험 확인됨/성공사례 미확인)으로
       화면에서 뺌 -- 필요하면 postprocess_pipeline.process_glb_to_foot()를 스크립트로 직접 호출.</span>
@@ -199,6 +200,7 @@ document.getElementById("run1").onclick = async () => {
       reference_length_mm: parseFloat(document.getElementById("s1_ref_len").value) || null,
       two_pass: document.getElementById("s1_two_pass").checked,
       prune_neck_fragments: document.getElementById("s1_prune_neck").checked,
+      trim_leg_no_rebound: document.getElementById("s1_no_rebound").checked,
       cropped_file: croppedFile,
       down_direction: chosenDirection,
     });
