@@ -45,13 +45,11 @@ def fill_small_holes(
     mesh: trimesh.Trimesh,
     *,
     max_hole_diameter_ratio: float = 0.05,
-    use_fan: bool = True,
 ) -> tuple[trimesh.Trimesh, int]:
-    """작은 구멍(핀홀)만 팬 삼각분할로 메운다. 큰 구멍(발바닥 등)은 그대로 둔다.
+    """작은 구멍(핀홀)만 중심점-팬으로 메운다. 큰 구멍(발바닥 등)은 그대로 둔다.
 
     Args:
         max_hole_diameter_ratio: 구멍 바운딩박스 대각선 / 메쉬 전체 대각선 비율 상한.
-        use_fan: 볼록하지 않은 구멍도 팬 삼각분할로 메울지.
 
     Returns:
         (구멍 메운 메쉬, 실제로 메운 구멍 개수).
@@ -79,19 +77,50 @@ def fill_small_holes(
     if not small_holes:
         return mesh, 0
 
-    new_faces = trimesh.geometry.triangulate_quads(small_holes, use_fan=use_fan)
-    if len(new_faces) == 0:
-        return mesh, 0
+    out = _fill_holes_centroid_fan(mesh, small_holes, boundary)
+    return out, len(small_holes)
 
-    new_edges = trimesh.geometry.faces_to_edges(new_faces)
+
+def _fill_holes_centroid_fan(
+    mesh: trimesh.Trimesh, holes: list[list[int]], boundary: np.ndarray,
+) -> trimesh.Trimesh:
+    """구멍마다 새 중심점 정점을 하나씩 추가하고 그 중심에서 부채꼴로 채운다.
+
+    `trimesh.geometry.triangulate_quads(use_fan=True)`는 경계의 한 귀퉁이
+    정점에서 부채꼴을 펴는 방식이라, 구멍이 볼록하지 않으면 삼각형이 서로
+    가로질러 비틀리며 찌그러져 보인다(trimesh 자체 docstring 경고 -- "may
+    be wrong if the holes are non-convex", project_5 실측으로 확인: 58각형
+    비볼록 구멍을 메웠더니 구겨진 패치가 됨). 중심점 기반 팬은 모든 삼각형이
+    중심 한 점을 공유해 볼록/비볼록과 무관하게 안정적이다.
+
+    `boundary`(원본 경계 엣지 전체)와 새 면의 엣지를 대조해 winding을 맞춘다
+    -- `fill_round_holes()`/`fill_small_holes()`의 기존 팬 채움과 같은 방식.
+    """
+    n_existing = len(mesh.vertices)
+    new_vertices: list[np.ndarray] = []
+    new_faces: list[list[int]] = []
+    for loop in holes:
+        centroid = mesh.vertices[loop].mean(axis=0)
+        center_idx = n_existing + len(new_vertices)
+        new_vertices.append(centroid)
+        n = len(loop)
+        for i in range(n):
+            a, b = loop[i], loop[(i + 1) % n]
+            new_faces.append([center_idx, a, b])
+    if not new_faces:
+        return mesh
+
+    new_faces_arr = np.array(new_faces, dtype=np.int64)
+    new_edges = trimesh.geometry.faces_to_edges(new_faces_arr)
     hashable_new = trimesh.grouping.hashable_rows(new_edges)
     hashable_old = trimesh.grouping.hashable_rows(boundary)
     needs_reverse = np.isin(hashable_new, hashable_old).reshape((-1, 3)).any(axis=1)
-    new_faces[needs_reverse] = np.fliplr(new_faces[needs_reverse])
+    new_faces_arr[needs_reverse] = np.fliplr(new_faces_arr[needs_reverse])
 
     out = mesh.copy()
-    out.extend_faces(new_faces)
-    return out, len(small_holes)
+    out.vertices = np.vstack([out.vertices, np.array(new_vertices)])
+    out.faces = np.vstack([out.faces, new_faces_arr])
+    return out
 
 
 def _hole_diag_and_circularity(mesh: trimesh.Trimesh, loop: list[int]) -> tuple[float, float]:
@@ -114,7 +143,6 @@ def fill_round_holes(
     *,
     min_circularity: float = 0.7,
     max_hole_diameter_ratio: float = 0.6,
-    use_fan: bool = True,
 ) -> tuple[trimesh.Trimesh, int]:
     """둥근 구멍(단순 미관측 결손으로 추정)만 크기와 무관하게 메운다.
 
@@ -123,6 +151,8 @@ def fill_round_holes(
     - 실측(project_228): 절단면 원형도 0.39, 단순 결손 구멍 0.92로 구분됨 --
       애매한 케이스도 있어 min_circularity 기본값 보수적으로 0.7.
     - max_hole_diameter_ratio(기본 0.6)를 안전판으로 병행 사용할 것.
+    - 중심점-팬(`_fill_holes_centroid_fan`)으로 채운다(2026-09-01부터, 이전엔
+      귀퉁이-팬이라 비볼록 구멍에서 찌그러짐, project_5 실측으로 확인).
     """
     if len(mesh.faces) < 3 or mesh.is_watertight:
         return mesh, 0
@@ -146,18 +176,7 @@ def fill_round_holes(
     if not round_holes:
         return mesh, 0
 
-    new_faces = trimesh.geometry.triangulate_quads(round_holes, use_fan=use_fan)
-    if len(new_faces) == 0:
-        return mesh, 0
-
-    new_edges = trimesh.geometry.faces_to_edges(new_faces)
-    hashable_new = trimesh.grouping.hashable_rows(new_edges)
-    hashable_old = trimesh.grouping.hashable_rows(boundary)
-    needs_reverse = np.isin(hashable_new, hashable_old).reshape((-1, 3)).any(axis=1)
-    new_faces[needs_reverse] = np.fliplr(new_faces[needs_reverse])
-
-    out = mesh.copy()
-    out.extend_faces(new_faces)
+    out = _fill_holes_centroid_fan(mesh, round_holes, boundary)
     return out, len(round_holes)
 
 
