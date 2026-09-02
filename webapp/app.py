@@ -63,20 +63,7 @@ CHECKPOINTS_DIR = HPLAI_DIR / "checkpoints_local"
 # (1단계에서 미리 축약하지 않음, 2026-09-01부터).
 DEFAULT_TARGET_FACES = 36238
 
-# 얼린(frozen) exe엔 별도 python.exe가 없어 "python.exe stage1_worker.py" 식
-# 호출이 안 된다 -- 대신 이 exe 자체를 특수 플래그로 재귀 호출한다
-# (launcher.py의 워커 분기 참고). 개발 모드(python app.py)에서는 기존 그대로.
-# 얼린 상태에서 `__file__` 기준 경로는 PyInstaller 번들 구조를 못 따라간다.
-# 두 위치를 구분해야 함(실측으로 확인, 서로 다름):
-#   - _APP_DIR(exe 옆): 잡(job) 데이터처럼 쓰기 가능해야 하는 것.
-#   - _BUNDLE_DIR(sys._MEIPASS): --add-data로 넣은 읽기전용 번들 자산
-#     (templates/, data/models/) -- onedir는 `_internal/`, onefile은 임시
-#     추출 폴더라 exe 옆이 아님.
-FROZEN = getattr(sys, "frozen", False)
-_APP_DIR = Path(sys.executable).resolve().parent if FROZEN else Path(__file__).resolve().parent
-_BUNDLE_DIR = Path(sys._MEIPASS) if FROZEN else Path(__file__).resolve().parent  # type: ignore[attr-defined]
-
-JOBS_DIR = _APP_DIR / "jobs"
+JOBS_DIR = Path(__file__).resolve().parent / "jobs"
 JOBS_DIR.mkdir(exist_ok=True)
 
 from foot_engine.sfm.dense import find_floor_contact_mask, rest_on_floor  # noqa: E402
@@ -88,21 +75,7 @@ from foot_engine.stl_foot_extract.postprocess_pipeline import (  # noqa: E402
 STAGE1_WORKER = Path(__file__).resolve().parent / "stage1_worker.py"
 STAGE1_ORIENTATION_WORKER = Path(__file__).resolve().parent / "stage1_orientation_worker.py"
 
-
-def _stage1_worker_cmd() -> list[str]:
-    if FROZEN:
-        return [sys.executable, "--stage1-worker"]
-    return [sys.executable, str(STAGE1_WORKER)]
-
-
-def _stage1_orientation_worker_cmd() -> list[str]:
-    if FROZEN:
-        return [sys.executable, "--stage1-orientation-worker"]
-    return [sys.executable, str(STAGE1_ORIENTATION_WORKER)]
-
-# 얼린(frozen) exe에서는 Flask 기본 template_folder 추정(모듈 위치 기준)이
-# PyInstaller 번들 임시 폴더 구조를 못 따라간다 -- exe 옆 templates/를 명시.
-app = Flask(__name__, template_folder=str(_BUNDLE_DIR / "templates")) if FROZEN else Flask(__name__)
+app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 512 * 1024 * 1024  # 512MB
 
 
@@ -167,7 +140,8 @@ def api_stage1_orientation(job_id):
 
         out_cropped = d / "1a_cropped.glb"
         result_json = d / "1a_orientation_result.json"
-        cmd = _stage1_orientation_worker_cmd() + [
+        cmd = [
+            sys.executable, str(STAGE1_ORIENTATION_WORKER),
             "--input", str(inputs[0]), "--output_cropped", str(out_cropped),
             "--job_dir", str(d), "--result_json", str(result_json),
         ]
@@ -309,7 +283,8 @@ def api_stage1(job_id):
 
         out_path = d / "1_crop_ankle.glb"
         result_json = d / "1_crop_ankle_result.json"
-        cmd = _stage1_worker_cmd() + [
+        cmd = [
+            sys.executable, str(STAGE1_WORKER),
             "--input", str(inputs[0]), "--output", str(out_path),
             "--trim_leg", "1" if trim_leg else "0",
             "--two_pass", "1" if two_pass else "0",
